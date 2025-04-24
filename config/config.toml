@@ -1,0 +1,9 @@
+[motd]
+message = "Wellcome to this test server"
+always_send = true
+
+[network]
+bind_ipv4 = "127.0.0.1"
+bind_ipv6 = "::"
+port = "6837"
+
