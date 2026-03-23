@@ -1,5 +1,7 @@
 # nvdaremote-server-rs
 
+[![CI](https://github.com/ragb/nvda-remote-server-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/ragb/nvda-remote-server-rs/actions/workflows/ci.yml)
+
 A high-performance NVDA Remote relay server written in Rust.
 
 This is a drop-in replacement for the [Python NVDA Remote server](https://github.com/jmdaweb/NVDARemoteServer), compatible with the [NVDA Remote](https://nvdaremote.com/) client addon (protocol v1 and v2).
