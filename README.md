@@ -1,6 +1,7 @@
 # nvdaremote-server-rs
 
 [![CI](https://github.com/ragb/nvda-remote-server-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/ragb/nvda-remote-server-rs/actions/workflows/ci.yml)
+[![Docker](https://github.com/ragb/nvda-remote-server-rs/actions/workflows/docker.yml/badge.svg)](https://github.com/ragb/nvda-remote-server-rs/actions/workflows/docker.yml)
 
 A high-performance NVDA Remote relay server written in Rust.
 
@@ -88,6 +89,19 @@ The server does not parse relayed message content -- it forwards key events, spe
 
 ## Docker
 
+Pre-built images are available on GitHub Container Registry:
+
+```sh
+docker pull ghcr.io/ragb/nvda-remote-server-rs:edge
+docker run -p 6837:6837 ghcr.io/ragb/nvda-remote-server-rs:edge
+```
+
+Multi-arch images (amd64/arm64) are published automatically:
+- `edge` — latest master build
+- `v1.0.0`, `1.0`, `1`, `latest` — tagged releases
+
+Or build locally:
+
 ```sh
 docker build -t nvdaremote-server .
 docker run -p 6837:6837 nvdaremote-server
@@ -96,7 +110,7 @@ docker run -p 6837:6837 nvdaremote-server
 Configuration can be overridden with environment variables using the `NVDAREMOTE` prefix and `__` separator:
 
 ```sh
-docker run -p 6837:6837 -e NVDAREMOTE__NETWORK__PORT=7000 nvdaremote-server
+docker run -p 6837:6837 -e NVDAREMOTE__NETWORK__PORT=7000 ghcr.io/ragb/nvda-remote-server-rs:edge
 ```
 
 ## Benchmarks
