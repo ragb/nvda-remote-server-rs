@@ -1,0 +1,7 @@
+target/
+bench/
+.git/
+.cargo/
+.claude/
+tests/
+*.md

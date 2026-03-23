@@ -4,5 +4,5 @@ always_send = true
 
 [network]
 bind_ipv4 = "127.0.0.1"
-bind_ipv6 = "::"
+# bind_ipv6 = "::"
 port = 6837

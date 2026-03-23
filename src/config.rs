@@ -24,6 +24,7 @@ impl AppConfig {
     pub fn load() -> Result<Self> {
         let config = config::Config::builder()
             .add_source(config::File::with_name("config/config"))
+            .add_source(config::Environment::with_prefix("NVDAREMOTE").separator("__"))
             .build()
             .context("Failed to load configuration")?;
 

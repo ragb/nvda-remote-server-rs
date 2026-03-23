@@ -1,0 +1,16 @@
+[package]
+name = "nvda-remote-bench"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "bench"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tokio-rustls = "0.26"
+rustls = { version = "0.23", features = ["ring"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
