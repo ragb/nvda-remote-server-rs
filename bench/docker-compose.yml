@@ -18,6 +18,11 @@ services:
     networks:
       - bench
 
+  go-server:
+    image: ghcr.io/tech10/nvdaremoteserver-docker:latest
+    networks:
+      - bench
+
   bench:
     build:
       context: .
@@ -26,16 +31,11 @@ services:
       - rust-server
       - python-threaded
       - python-async
+      - go-server
     entrypoint: ["/bin/sh", "-c", "sleep 5 && exec bench \"$$@\"", "--"]
     command:
       - --targets
-      - rust=rust-server:6837,python-threaded=python-threaded:6837,python-async=python-async:6837
-      - --ramp
-      - "10,50,100,200,500,1000,2000,5000"
-      - --messages
-      - "5"
-      - --timeout
-      - "30"
+      - rust=rust-server:6837,go=go-server:6837,python-async=python-async:6837,python-threaded=python-threaded:6837
     networks:
       - bench
 

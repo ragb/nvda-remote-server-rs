@@ -5,6 +5,8 @@ use serde::Deserialize;
 pub struct AppConfig {
     pub network: NetworkConfig,
     pub motd: MotdConfig,
+    #[serde(default)]
+    pub tls: TlsConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -18,6 +20,12 @@ pub struct NetworkConfig {
 pub struct MotdConfig {
     pub message: String,
     pub always_send: bool,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct TlsConfig {
+    pub cert_path: Option<String>,
+    pub key_path: Option<String>,
 }
 
 impl AppConfig {

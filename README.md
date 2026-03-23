@@ -125,11 +125,12 @@ cargo run --release -- --targets rust=localhost:6837 --ramp 100,500,1000,2000,50
 
 | Server | Throughput | p50 latency | p95 latency | p99 latency |
 |---|---|---|---|---|
-| **nvdaremote-server-rs** | **144,208 msg/s** | **116 μs** | **234 μs** | **301 μs** |
-| Python async (nvda-remote) | 2,111 msg/s | 2,032 μs | 2,668 μs | 3,579 μs |
-| Python threaded (NVDARemoteServer) | 1,052 msg/s | 10,410 μs | 10,848 μs | 11,319 μs |
+| **nvdaremote-server-rs** | **182,596 msg/s** | **101 μs** | **201 μs** | **268 μs** |
+| Go ([tech10/nvdaRemoteServer](https://github.com/tech10/nvdaRemoteServer)) | 2,412 msg/s | 148 μs | 1,677 μs | 3,303 μs |
+| Python async ([nvda-remote](https://github.com/a2hsh/nvda-remote)) | 2,089 msg/s | 2,331 μs | 2,852 μs | 3,169 μs |
+| Python threaded ([NVDARemoteServer](https://github.com/jmdaweb/NVDARemoteServer)) | 615 msg/s | 10,249 μs | 10,684 μs | 11,152 μs |
 
-The Rust server handles 5,000+ concurrent session pairs. The Python servers struggle beyond 50.
+The Rust server handles 5,000+ concurrent session pairs. The other servers struggle beyond 50.
 
 ## Testing
 
