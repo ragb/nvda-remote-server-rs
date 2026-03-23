@@ -84,6 +84,51 @@ The server implements the NVDA Remote relay protocol:
 
 The server does not parse relayed message content -- it forwards key events, speech, braille, clipboard, and any other message types as-is.
 
+## Docker
+
+```sh
+docker build -t nvdaremote-server .
+docker run -p 6837:6837 nvdaremote-server
+```
+
+Configuration can be overridden with environment variables using the `NVDAREMOTE` prefix and `__` separator:
+
+```sh
+docker run -p 6837:6837 -e NVDAREMOTE__NETWORK__PORT=7000 nvdaremote-server
+```
+
+## Benchmarks
+
+The `bench/` directory contains a benchmark tool that compares this server against the Python implementations.
+
+```sh
+# Run all servers in Docker and benchmark them
+docker compose -f bench/docker-compose.yml up --build
+```
+
+Or run the bench tool directly against a running server:
+
+```sh
+cd bench
+cargo run --release -- --targets rust=localhost:6837 --pairs 50 --messages 200
+```
+
+**Ramp mode** tests escalating concurrent sessions to find server limits:
+
+```sh
+cargo run --release -- --targets rust=localhost:6837 --ramp 100,500,1000,2000,5000 --messages 5
+```
+
+### Results (50 pairs, 200 messages each, all in Docker)
+
+| Server | Throughput | p50 latency | p95 latency | p99 latency |
+|---|---|---|---|---|
+| **nvdaremote-server-rs** | **144,208 msg/s** | **116 μs** | **234 μs** | **301 μs** |
+| Python async (nvda-remote) | 2,111 msg/s | 2,032 μs | 2,668 μs | 3,579 μs |
+| Python threaded (NVDARemoteServer) | 1,052 msg/s | 10,410 μs | 10,848 μs | 11,319 μs |
+
+The Rust server handles 5,000+ concurrent session pairs. The Python servers struggle beyond 50.
+
 ## Testing
 
 ```sh
