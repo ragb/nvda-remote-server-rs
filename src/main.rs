@@ -22,8 +22,8 @@ fn load_tls_from_files(
 ) -> Result<(CertificateDer<'static>, PrivatePkcs8KeyDer<'static>)> {
     let cert_pem = std::fs::read(cert_path)
         .with_context(|| format!("Failed to read cert file: {cert_path}"))?;
-    let key_pem = std::fs::read(key_path)
-        .with_context(|| format!("Failed to read key file: {key_path}"))?;
+    let key_pem =
+        std::fs::read(key_path).with_context(|| format!("Failed to read key file: {key_path}"))?;
 
     let cert = rustls_pemfile::certs(&mut &cert_pem[..])
         .next()
@@ -72,13 +72,12 @@ async fn main() -> Result<()> {
     let cert_path = config.tls.cert_path.as_deref().unwrap_or("cert.pem");
     let key_path = config.tls.key_path.as_deref().unwrap_or("key.pem");
 
-    let (cert_der, key_der) =
-        if Path::new(cert_path).exists() && Path::new(key_path).exists() {
-            info!("Loading TLS certificate from disk");
-            load_tls_from_files(cert_path, key_path)?
-        } else {
-            generate_and_save_tls(cert_path, key_path)?
-        };
+    let (cert_der, key_der) = if Path::new(cert_path).exists() && Path::new(key_path).exists() {
+        info!("Loading TLS certificate from disk");
+        load_tls_from_files(cert_path, key_path)?
+    } else {
+        generate_and_save_tls(cert_path, key_path)?
+    };
 
     let tls_config = rustls::ServerConfig::builder()
         .with_no_client_auth()
