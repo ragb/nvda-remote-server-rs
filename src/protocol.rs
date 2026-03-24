@@ -36,8 +36,10 @@ pub enum ServerMessage {
     },
     ChannelJoined {
         channel: String,
+        user_id: u64,
         user_ids: Vec<u64>,
         clients: Vec<ClientInfo>,
+        e2e_available: bool,
     },
     ClientJoined {
         user_id: u64,
@@ -57,6 +59,7 @@ pub enum ServerMessage {
 pub struct ClientInfo {
     pub id: u64,
     pub connection_type: Option<ConnectionType>,
+    pub e2e_supported: bool,
 }
 
 impl ServerMessage {
@@ -158,15 +161,19 @@ mod tests {
     fn serialize_channel_joined() {
         let msg = ServerMessage::ChannelJoined {
             channel: "test".to_string(),
+            user_id: 3,
             user_ids: vec![1, 2],
+            e2e_available: true,
             clients: vec![
                 ClientInfo {
                     id: 1,
                     connection_type: Some(ConnectionType::Master),
+                    e2e_supported: true,
                 },
                 ClientInfo {
                     id: 2,
                     connection_type: Some(ConnectionType::Slave),
+                    e2e_supported: false,
                 },
             ],
         };
@@ -174,9 +181,13 @@ mod tests {
             serde_json::from_str(&serde_json::to_string(&msg).unwrap()).unwrap();
         assert_eq!(json["type"], "channel_joined");
         assert_eq!(json["channel"], "test");
+        assert_eq!(json["user_id"], 3);
         assert_eq!(json["user_ids"], serde_json::json!([1, 2]));
         assert_eq!(json["clients"][0]["connection_type"], "master");
+        assert_eq!(json["clients"][0]["e2e_supported"], true);
         assert_eq!(json["clients"][1]["connection_type"], "slave");
+        assert_eq!(json["clients"][1]["e2e_supported"], false);
+        assert_eq!(json["e2e_available"], true);
     }
 
     #[test]
@@ -186,6 +197,7 @@ mod tests {
             client: ClientInfo {
                 id: 5,
                 connection_type: Some(ConnectionType::Master),
+                e2e_supported: true,
             },
         };
         let json: serde_json::Value =
@@ -193,6 +205,7 @@ mod tests {
         assert_eq!(json["type"], "client_joined");
         assert_eq!(json["user_id"], 5);
         assert_eq!(json["client"]["id"], 5);
+        assert_eq!(json["client"]["e2e_supported"], true);
     }
 
     #[test]
@@ -202,12 +215,14 @@ mod tests {
             client: ClientInfo {
                 id: 3,
                 connection_type: Some(ConnectionType::Slave),
+                e2e_supported: false,
             },
         };
         let json: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&msg).unwrap()).unwrap();
         assert_eq!(json["type"], "client_left");
         assert_eq!(json["user_id"], 3);
+        assert_eq!(json["client"]["e2e_supported"], false);
     }
 
     #[test]
@@ -253,10 +268,12 @@ mod tests {
         let info = ClientInfo {
             id: 1,
             connection_type: None,
+            e2e_supported: false,
         };
         let json: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&info).unwrap()).unwrap();
         assert_eq!(json["id"], 1);
         assert!(json["connection_type"].is_null());
+        assert_eq!(json["e2e_supported"], false);
     }
 }

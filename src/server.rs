@@ -12,6 +12,7 @@ use crate::protocol::{ClientInfo, ConnectionType, ServerMessage};
 pub struct ServerState {
     pub channels: DashMap<String, Channel>,
     pub motd: MotdConfig,
+    pub e2e_available: bool,
     next_client_id: AtomicU64,
 }
 
@@ -27,10 +28,11 @@ pub struct ChannelMember {
 }
 
 impl ServerState {
-    pub fn new(motd: MotdConfig) -> Arc<Self> {
+    pub fn new(motd: MotdConfig, e2e_available: bool) -> Arc<Self> {
         Arc::new(Self {
             channels: DashMap::new(),
             motd,
+            e2e_available,
             next_client_id: AtomicU64::new(1),
         })
     }
@@ -76,6 +78,7 @@ impl ServerState {
             .map(|m| ClientInfo {
                 id: m.id,
                 connection_type: m.connection_type,
+                e2e_supported: m.protocol_version >= 3,
             })
             .collect();
 
@@ -198,7 +201,7 @@ mod tests {
 
     #[test]
     fn client_ids_are_sequential() {
-        let state = ServerState::new(test_motd());
+        let state = ServerState::new(test_motd(), true);
         assert_eq!(state.next_client_id(), 1);
         assert_eq!(state.next_client_id(), 2);
         assert_eq!(state.next_client_id(), 3);
@@ -206,7 +209,7 @@ mod tests {
 
     #[test]
     fn generate_key_is_9_digits() {
-        let state = ServerState::new(test_motd());
+        let state = ServerState::new(test_motd(), true);
         for _ in 0..20 {
             let key = state.generate_key();
             assert_eq!(key.len(), 9);
@@ -216,7 +219,7 @@ mod tests {
 
     #[test]
     fn generate_key_avoids_existing_channels() {
-        let state = ServerState::new(test_motd());
+        let state = ServerState::new(test_motd(), true);
         // Fill a bunch of channels — keys should still be unique
         let (member, _rx) = make_member(1, None, 2);
         state.join_channel("000000000", member);
@@ -226,7 +229,7 @@ mod tests {
 
     #[test]
     fn join_creates_channel() {
-        let state = ServerState::new(test_motd());
+        let state = ServerState::new(test_motd(), true);
         let (member, _rx) = make_member(1, Some(ConnectionType::Master), 2);
         let (ids, clients) = state.join_channel("testchan", member);
         assert!(ids.is_empty());
@@ -236,7 +239,7 @@ mod tests {
 
     #[test]
     fn join_returns_existing_members() {
-        let state = ServerState::new(test_motd());
+        let state = ServerState::new(test_motd(), true);
 
         let (m1, _rx1) = make_member(1, Some(ConnectionType::Master), 2);
         state.join_channel("chan", m1);
@@ -252,7 +255,7 @@ mod tests {
 
     #[test]
     fn leave_removes_member() {
-        let state = ServerState::new(test_motd());
+        let state = ServerState::new(test_motd(), true);
 
         let (m1, _rx1) = make_member(1, Some(ConnectionType::Master), 2);
         let (m2, _rx2) = make_member(2, Some(ConnectionType::Slave), 2);
@@ -272,7 +275,7 @@ mod tests {
 
     #[test]
     fn leave_last_member_destroys_channel() {
-        let state = ServerState::new(test_motd());
+        let state = ServerState::new(test_motd(), true);
 
         let (m1, _rx1) = make_member(1, None, 2);
         state.join_channel("chan", m1);
@@ -283,14 +286,14 @@ mod tests {
 
     #[test]
     fn leave_nonexistent_returns_none() {
-        let state = ServerState::new(test_motd());
+        let state = ServerState::new(test_motd(), true);
         let result = state.leave_channel("nonexistent", 999);
         assert!(result.is_none());
     }
 
     #[test]
     fn broadcast_sends_to_others_not_self() {
-        let state = ServerState::new(test_motd());
+        let state = ServerState::new(test_motd(), true);
 
         let (m1, mut rx1) = make_member(1, None, 2);
         let (m2, mut rx2) = make_member(2, None, 2);
@@ -310,7 +313,7 @@ mod tests {
 
     #[test]
     fn broadcast_strips_v2_fields_for_v1_clients() {
-        let state = ServerState::new(test_motd());
+        let state = ServerState::new(test_motd(), true);
 
         let (m1, _rx1) = make_member(1, None, 2); // sender, v2
         let (m2, mut rx2) = make_member(2, None, 1); // receiver, v1
@@ -343,7 +346,7 @@ mod tests {
 
     #[test]
     fn notify_channel_sends_to_others() {
-        let state = ServerState::new(test_motd());
+        let state = ServerState::new(test_motd(), true);
 
         let (m1, mut rx1) = make_member(1, None, 2);
         let (m2, mut rx2) = make_member(2, None, 2);

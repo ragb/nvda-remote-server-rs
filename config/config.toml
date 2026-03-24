@@ -7,6 +7,12 @@ bind_ipv4 = "0.0.0.0"
 # bind_ipv6 = "::"
 port = 6837
 
+[e2e]
+# Allow clients to use end-to-end encryption (protocol v3).
+# When false, channel_joined will advertise e2e_available=false
+# and clients will skip the key exchange.
+allow = true
+
 [tls]
 # cert_path = "cert.pem"
 # key_path = "key.pem"

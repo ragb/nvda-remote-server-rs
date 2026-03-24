@@ -58,7 +58,9 @@ impl ClientSession {
             return;
         }
 
-        info!(channel = %channel, connection_type = ?connection_type, "Joining channel");
+        let e2e_supported = self.protocol_version >= 3;
+
+        info!(channel = %channel, connection_type = ?connection_type, e2e_supported, "Joining channel");
 
         let member = ChannelMember {
             id: self.id,
@@ -76,8 +78,10 @@ impl ClientSession {
 
         self.send(&ServerMessage::ChannelJoined {
             channel: channel.clone(),
+            user_id: self.id,
             user_ids: existing_ids,
             clients: existing_clients,
+            e2e_available: self.state.e2e_available,
         });
 
         if self.state.motd.always_send || !self.state.motd.message.is_empty() {
@@ -95,6 +99,7 @@ impl ClientSession {
                 client: ClientInfo {
                     id: self.id,
                     connection_type,
+                    e2e_supported,
                 },
             },
         );
@@ -126,6 +131,7 @@ impl ClientSession {
                     client: ClientInfo {
                         id: self.id,
                         connection_type: member.connection_type,
+                        e2e_supported: member.protocol_version >= 3,
                     },
                 },
             );

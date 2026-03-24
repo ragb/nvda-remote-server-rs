@@ -20,10 +20,13 @@ const RECV_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Helper: create server state and spawn a client handler, returning the client-side stream.
 fn setup_server() -> Arc<nvdaremote_server_rs::server::ServerState> {
-    nvdaremote_server_rs::server::ServerState::new(nvdaremote_server_rs::config::MotdConfig {
-        message: "Welcome to test server".to_string(),
-        always_send: true,
-    })
+    nvdaremote_server_rs::server::ServerState::new(
+        nvdaremote_server_rs::config::MotdConfig {
+            message: "Welcome to test server".to_string(),
+            always_send: true,
+        },
+        true,
+    )
 }
 
 /// Spawn a client handler and return the client-side duplex stream for writing/reading.
@@ -94,6 +97,10 @@ async fn client_join_receives_channel_joined_and_motd() {
     let msg = recv(&mut reader).await;
     assert_eq!(msg["type"], "channel_joined");
     assert_eq!(msg["channel"], "123456789");
+    assert!(
+        msg["user_id"].as_u64().is_some(),
+        "channel_joined should include the client's own user_id"
+    );
     assert!(
         msg["user_ids"].as_array().unwrap().is_empty(),
         "First client should see no existing users"
@@ -705,11 +712,13 @@ async fn protocol_version_without_join_is_fine() {
 
 #[tokio::test]
 async fn motd_sent_when_message_not_empty() {
-    let state =
-        nvdaremote_server_rs::server::ServerState::new(nvdaremote_server_rs::config::MotdConfig {
+    let state = nvdaremote_server_rs::server::ServerState::new(
+        nvdaremote_server_rs::config::MotdConfig {
             message: "Custom MOTD".to_string(),
             always_send: false,
-        });
+        },
+        true,
+    );
 
     let stream = connect_client(&state);
     let (mut writer, mut reader) = split_client(stream);
@@ -727,4 +736,252 @@ async fn motd_sent_when_message_not_empty() {
     assert_eq!(msg["type"], "motd");
     assert_eq!(msg["motd"], "Custom MOTD");
     assert_eq!(msg["force_display"], false);
+}
+
+// ============================================================================
+// E2E encryption support tests
+// ============================================================================
+
+// Test: v3 client shows e2e_supported=true in channel_joined and client_joined
+#[tokio::test]
+async fn e2e_supported_field_in_channel_joined() {
+    let state = setup_server();
+
+    // Client 1: v3 (e2e capable)
+    let stream1 = connect_client(&state);
+    let (mut w1, mut r1) = split_client(stream1);
+    send_write(&mut w1, r#"{"type":"protocol_version","version":3}"#).await;
+    send_write(
+        &mut w1,
+        r#"{"type":"join","channel":"e2e_test","connection_type":"master"}"#,
+    )
+    .await;
+    let msg = recv(&mut r1).await; // channel_joined
+    assert_eq!(msg["type"], "channel_joined");
+    assert!(msg["clients"].as_array().unwrap().is_empty());
+    let _ = recv(&mut r1).await; // motd
+
+    // Client 2: v3 joins — should see client 1 with e2e_supported=true
+    let stream2 = connect_client(&state);
+    let (mut w2, mut r2) = split_client(stream2);
+    send_write(&mut w2, r#"{"type":"protocol_version","version":3}"#).await;
+    send_write(
+        &mut w2,
+        r#"{"type":"join","channel":"e2e_test","connection_type":"slave"}"#,
+    )
+    .await;
+    let msg = recv(&mut r2).await; // channel_joined
+    assert_eq!(msg["type"], "channel_joined");
+    let clients = msg["clients"].as_array().unwrap();
+    assert_eq!(clients.len(), 1);
+    assert_eq!(clients[0]["e2e_supported"], true);
+    let _ = recv(&mut r2).await; // motd
+
+    // Client 1 should receive client_joined with e2e_supported=true
+    let msg = recv(&mut r1).await;
+    assert_eq!(msg["type"], "client_joined");
+    assert_eq!(msg["client"]["e2e_supported"], true);
+}
+
+// Test: v2 client shows e2e_supported=false
+#[tokio::test]
+async fn e2e_v2_client_shows_not_supported() {
+    let state = setup_server();
+
+    // Client 1: v2 (no e2e)
+    let stream1 = connect_client(&state);
+    let (mut w1, mut r1) = split_client(stream1);
+    send_write(&mut w1, r#"{"type":"protocol_version","version":2}"#).await;
+    send_write(
+        &mut w1,
+        r#"{"type":"join","channel":"e2e_v2","connection_type":"master"}"#,
+    )
+    .await;
+    let _ = recv(&mut r1).await; // channel_joined
+    let _ = recv(&mut r1).await; // motd
+
+    // Client 2: v3 joins — should see client 1 with e2e_supported=false
+    let stream2 = connect_client(&state);
+    let (mut w2, mut r2) = split_client(stream2);
+    send_write(&mut w2, r#"{"type":"protocol_version","version":3}"#).await;
+    send_write(
+        &mut w2,
+        r#"{"type":"join","channel":"e2e_v2","connection_type":"slave"}"#,
+    )
+    .await;
+    let msg = recv(&mut r2).await; // channel_joined
+    let clients = msg["clients"].as_array().unwrap();
+    assert_eq!(clients[0]["e2e_supported"], false);
+    let _ = recv(&mut r2).await; // motd
+
+    // Client 1 receives client_joined with e2e_supported=true (client 2 is v3)
+    let msg = recv(&mut r1).await;
+    assert_eq!(msg["type"], "client_joined");
+    assert_eq!(msg["client"]["e2e_supported"], true);
+}
+
+// Test: e2e_pubkey messages relay correctly with origin added
+#[tokio::test]
+async fn e2e_pubkey_relayed_with_origin() {
+    let state = setup_server();
+
+    let stream1 = connect_client(&state);
+    let (mut w1, mut r1) = split_client(stream1);
+    send_write(&mut w1, r#"{"type":"protocol_version","version":2}"#).await;
+    send_write(
+        &mut w1,
+        r#"{"type":"join","channel":"e2e_relay","connection_type":"master"}"#,
+    )
+    .await;
+    let _ = recv(&mut r1).await; // channel_joined
+    let _ = recv(&mut r1).await; // motd
+
+    let stream2 = connect_client(&state);
+    let (mut w2, mut r2) = split_client(stream2);
+    send_write(&mut w2, r#"{"type":"protocol_version","version":2}"#).await;
+    send_write(
+        &mut w2,
+        r#"{"type":"join","channel":"e2e_relay","connection_type":"slave"}"#,
+    )
+    .await;
+    let _ = recv(&mut r2).await; // channel_joined
+    let _ = recv(&mut r2).await; // motd
+    let _ = recv(&mut r1).await; // client_joined
+
+    // Client 1 sends e2e_pubkey — should relay to client 2 with origin
+    send_write(
+        &mut w1,
+        r#"{"type":"e2e_pubkey","pubkey":"AQID...base64...","nonce_prefix":"AAEC"}"#,
+    )
+    .await;
+
+    let msg = recv(&mut r2).await;
+    assert_eq!(msg["type"], "e2e_pubkey");
+    assert_eq!(msg["pubkey"], "AQID...base64...");
+    assert_eq!(msg["nonce_prefix"], "AAEC");
+    assert!(msg.get("origin").is_some(), "Should have origin added");
+}
+
+// Test: e2e_data (encrypted payload) relays opaquely
+#[tokio::test]
+async fn e2e_data_relayed_opaquely() {
+    let state = setup_server();
+
+    let stream1 = connect_client(&state);
+    let (mut w1, mut r1) = split_client(stream1);
+    send_write(&mut w1, r#"{"type":"protocol_version","version":2}"#).await;
+    send_write(
+        &mut w1,
+        r#"{"type":"join","channel":"e2e_data","connection_type":"master"}"#,
+    )
+    .await;
+    let _ = recv(&mut r1).await;
+    let _ = recv(&mut r1).await;
+
+    let stream2 = connect_client(&state);
+    let (mut w2, mut r2) = split_client(stream2);
+    send_write(&mut w2, r#"{"type":"protocol_version","version":2}"#).await;
+    send_write(
+        &mut w2,
+        r#"{"type":"join","channel":"e2e_data","connection_type":"slave"}"#,
+    )
+    .await;
+    let _ = recv(&mut r2).await;
+    let _ = recv(&mut r2).await;
+    let _ = recv(&mut r1).await; // client_joined
+
+    // Client 1 sends encrypted data — server should relay as-is (plus origin)
+    send_write(
+        &mut w1,
+        r#"{"type":"e2e_data","ciphertext":"c29tZSBlbmNyeXB0ZWQgZGF0YQ==","nonce":"AAAAAAAAAAAAAAAA"}"#,
+    )
+    .await;
+
+    let msg = recv(&mut r2).await;
+    assert_eq!(msg["type"], "e2e_data");
+    assert_eq!(msg["ciphertext"], "c29tZSBlbmNyeXB0ZWQgZGF0YQ==");
+    assert_eq!(msg["nonce"], "AAAAAAAAAAAAAAAA");
+    assert!(msg.get("origin").is_some());
+}
+
+// Test: client_left includes e2e_supported field
+#[tokio::test]
+async fn e2e_client_left_includes_e2e_supported() {
+    let state = setup_server();
+
+    let stream1 = connect_client(&state);
+    let (mut w1, mut r1) = split_client(stream1);
+    send_write(&mut w1, r#"{"type":"protocol_version","version":3}"#).await;
+    send_write(
+        &mut w1,
+        r#"{"type":"join","channel":"e2e_left","connection_type":"master"}"#,
+    )
+    .await;
+    let _ = recv(&mut r1).await;
+    let _ = recv(&mut r1).await;
+
+    let stream2 = connect_client(&state);
+    let (w2, mut r2) = split_client(stream2);
+    let mut w2 = w2;
+    send_write(&mut w2, r#"{"type":"protocol_version","version":3}"#).await;
+    send_write(
+        &mut w2,
+        r#"{"type":"join","channel":"e2e_left","connection_type":"slave"}"#,
+    )
+    .await;
+    let _ = recv(&mut r2).await;
+    let _ = recv(&mut r2).await;
+    let _ = recv(&mut r1).await; // client_joined
+
+    // Client 2 disconnects
+    drop(w2);
+    drop(r2);
+
+    let msg = recv(&mut r1).await;
+    assert_eq!(msg["type"], "client_left");
+    assert_eq!(msg["client"]["e2e_supported"], true);
+}
+
+// Test: server with e2e disabled advertises e2e_available=false
+#[tokio::test]
+async fn e2e_disabled_server_advertises_false() {
+    let state = nvdaremote_server_rs::server::ServerState::new(
+        nvdaremote_server_rs::config::MotdConfig {
+            message: String::new(),
+            always_send: false,
+        },
+        false, // e2e disabled
+    );
+
+    let stream = connect_client(&state);
+    let (mut writer, mut reader) = split_client(stream);
+    send_write(&mut writer, r#"{"type":"protocol_version","version":2}"#).await;
+    send_write(
+        &mut writer,
+        r#"{"type":"join","channel":"no_e2e","connection_type":"master"}"#,
+    )
+    .await;
+
+    let msg = recv(&mut reader).await;
+    assert_eq!(msg["type"], "channel_joined");
+    assert_eq!(msg["e2e_available"], false);
+}
+
+// Test: server with e2e enabled advertises e2e_available=true
+#[tokio::test]
+async fn e2e_enabled_server_advertises_true() {
+    let state = setup_server(); // e2e=true by default
+
+    let stream = connect_client(&state);
+    let (mut writer, mut reader) = split_client(stream);
+    send_write(&mut writer, r#"{"type":"protocol_version","version":2}"#).await;
+    send_write(
+        &mut writer,
+        r#"{"type":"join","channel":"yes_e2e","connection_type":"master"}"#,
+    )
+    .await;
+
+    let msg = recv(&mut reader).await;
+    assert_eq!(msg["type"], "channel_joined");
+    assert_eq!(msg["e2e_available"], true);
 }
