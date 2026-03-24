@@ -466,6 +466,24 @@ This is a client-side policy decision. The server just reports `e2e_supported` p
 ### Protected
 - All data-plane content (keystrokes, speech, braille, clipboard) between E2E peers
 - Forward secrecy (ephemeral keys per session)
+- **Sender authenticity via pairwise keys**: each peer pair has a unique shared secret. If the server lies about the `origin` field on the outer `e2e_data` envelope, decryption fails because the receiver would use the wrong pairwise key and AEAD authentication rejects the ciphertext. This means a passive or semi-active server cannot forge sender identity.
+
+### The `origin` field and server trust
+
+The relay server adds an `origin` field to all relayed messages (including `e2e_data`). This `origin` is **untrusted metadata** — it's set by the server, not the sender. In our design:
+
+- The **outer** `origin` on `e2e_data` is used only for pairwise key lookup (which peer's key to use for decryption).
+- If the server sets a wrong `origin`, the receiver uses the wrong key → AEAD decryption fails → message is rejected. The server cannot trick a client into accepting a forged message.
+- In a **full MITM** scenario (server substituted keys during exchange), the server has its own pairwise keys with each client and can set `origin` correctly for its fake sessions. This is detectable only via fingerprint verification.
+
+**Recommendation for clients**: include the sender's `user_id` inside the encrypted payload as an additional authenticity check. The receiver can then verify that the decrypted sender ID matches the outer `origin`. This is defense-in-depth — the pairwise AEAD already prevents forgery, but the inner ID makes the authentication explicit and auditable. Example:
+
+```json
+// Inside the encrypted plaintext:
+{"type": "key", "vk_code": 65, "pressed": true, "_from": 5}
+```
+
+The `_from` field is set by the sender before encryption. The receiver checks `_from == origin` after decryption. A mismatch indicates tampering.
 
 ### Not protected
 - **Metadata**: server sees who is in which channel, timing, message sizes

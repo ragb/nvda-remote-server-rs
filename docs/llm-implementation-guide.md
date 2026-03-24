@@ -6,6 +6,12 @@ This document provides complete instructions for an LLM (or developer) to implem
 
 NVDA Remote relays keystrokes, speech, braille, and clipboard data between NVDA instances through a relay server. Currently the server can read all traffic. This task adds E2E encryption so the server only sees opaque ciphertext.
 
+**Related NVDA issue**: https://github.com/nvaccess/nvda/issues/17784 — read the issue and all comments before implementing. Key points from the discussion:
+
+- **tech10** raised that the `origin` field (injected by the server) should not be trusted for authentication since E2E means the server shouldn't be able to modify message content. Our design handles this: pairwise AEAD keys mean a wrong `origin` causes decryption failure. As defense-in-depth, include the sender's `user_id` inside the encrypted payload (`_from` field) so the receiver can verify `_from == origin`.
+- **SaschaCowley** (assignee, NV Access) noted that protocol documentation is required and that `origin` as metadata doesn't need encryption but may need HMAC-like authenticity — our pairwise AEAD provides this implicitly.
+- The issue is milestoned for **2027.1** and assigned to SaschaCowley. Coordinate with NV Access before submitting a PR.
+
 The relay server (Rust) already supports:
 - Protocol v3: clients sending `protocol_version: 3` are marked `e2e_supported: true` in `ClientInfo`
 - `channel_joined` includes `user_id` (client's own ID) and `e2e_available` (server config flag)
