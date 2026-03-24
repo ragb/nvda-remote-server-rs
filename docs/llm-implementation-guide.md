@@ -574,3 +574,38 @@ After implementation, verify:
 6. **Session not available for all sends.** In `client.py`, `processKeyInput()` uses `self.leaderTransport.send()` directly. You need access to the `leaderSession` object to call `sendEncrypted()`. `self.leaderSession` already exists on `RemoteClient`.
 
 7. **The `SpeechCommandJSONEncoder` pitfall (critical).** When the follower sends `SPEAK` messages, the speech command objects (like `SynthCommand`) are serialized by the custom `SpeechCommandJSONEncoder` in the transport's serializer. But `E2ESession.encrypt()` uses plain `json.dumps()` which won't handle these objects. **You must use the transport's serializer for the inner plaintext**, or pre-serialize speech commands before passing to `encrypt()`. The simplest fix: make `encrypt()` accept pre-serialized bytes, or have `sendEncrypted()` serialize using the transport's serializer first, then encrypt the bytes.
+
+## Protocol documentation in the NVDA source
+
+**This is important.** The NVDA source currently has **no formal protocol specification** for NVDA Remote — not for v1, v2, or v3. The protocol is defined only through code. For E2E encryption, a formal spec is essential since it involves cryptographic properties that must be auditable.
+
+You must create a protocol specification document at:
+
+```
+projectDocs/design/remoteProtocol.md
+```
+
+This is alongside the existing `projectDocs/design/technicalDesignOverview.md`, which is NVDA's design documentation directory. There is no existing protocol doc in `projectDocs/dev/` or anywhere else in the tree — you are creating the first one.
+
+The document must cover the **entire** protocol (v1, v2, and v3), not just the E2E additions. It should be written for security auditors and future contributors who need to understand the protocol without reading the code. Include:
+
+### Required sections
+
+1. **Protocol overview** — line-delimited JSON over TLS, port 6837, connection lifecycle
+2. **Version history** — what v1, v2, and v3 each add
+3. **Connection handshake** — `protocol_version` → `join`/`generate_key` → `channel_joined` + `motd`
+4. **Message reference** — every `RemoteMessageType` with its fields, direction (client→server, server→client, client→client via relay), and which version introduced it
+5. **Relay behavior** — how the server forwards messages, `origin` injection (v2+), field stripping for v1 clients
+6. **E2E encryption specification (v3)** — this is the auditable part:
+   - Cryptographic primitives: X25519, XChaCha20-Poly1305, HKDF-SHA256, BLAKE2b
+   - Key exchange flow: `e2e_pubkey` message format, DH derivation, HKDF parameters (`salt="nvdaremote-e2e-v1"`, `info=""`)
+   - Nonce construction: 4-byte sender prefix + 12-byte zero padding + 8-byte big-endian counter = 24 bytes
+   - `e2e_data` message format: `to`, `ciphertext` (base64), `nonce` (base64)
+   - All-or-nothing rule and channel teardown on non-E2E peer join
+   - Fingerprint computation: `BLAKE2b(sort(pubkey_a, pubkey_b), digest_size=8)`
+   - Threat model: what is protected (data-plane content, forward secrecy), what is not (metadata, MITM without fingerprint verification)
+   - Explicit non-goals and Signal protocol comparison (reference `docs/e2e-encryption.md` in the relay server repo for the detailed tradeoff analysis)
+7. **Direct connection mode** — why E2E is not used (`e2e_available: false`), TLS is sufficient
+8. **Wire format examples** — complete JSON examples for every message in a typical E2E session
+
+This document is a **hard requirement** for the PR to NVDA. Any security-relevant protocol change must have a specification that can be audited independently of the implementation.
