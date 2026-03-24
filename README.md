@@ -107,7 +107,7 @@ Configuration:
 allow = true  # Set to false to disable E2E (e2e_available will be false in channel_joined)
 ```
 
-See [docs/e2e-encryption.md](docs/e2e-encryption.md) for the full protocol specification, security properties, and Signal protocol comparison. See [docs/llm-implementation-guide.md](docs/llm-implementation-guide.md) for step-by-step client implementation instructions.
+See [docs/e2e-encryption.md](docs/e2e-encryption.md) for the full protocol specification, security properties, and Signal protocol comparison.
 
 ## Docker
 
