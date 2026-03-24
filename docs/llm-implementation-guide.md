@@ -187,13 +187,18 @@ class E2ESession:
         peer.send_counter += 1
         return self._nonce_prefix + b"\x00" * 12 + counter_bytes
 
-    def encrypt(self, type: str, **kwargs: Any) -> list[dict[str, Any]]:
+    def encrypt(self, type: str, from_id: int, **kwargs: Any) -> list[dict[str, Any]]:
         """Encrypt a data-plane message for all peers.
 
         Returns a list of dicts, one per peer, each suitable as kwargs for:
             transport.send(RemoteMessageType.E2E_DATA, **msg)
+
+        The sender's user_id is included inside the encrypted payload as '_from'
+        for origin authenticity verification (defense-in-depth against a server
+        that lies about the outer 'origin' field). See docs/e2e-encryption.md
+        "The origin field and server trust" section.
         """
-        plaintext = json.dumps({"type": type, **kwargs}).encode("utf-8")
+        plaintext = json.dumps({"type": type, "_from": from_id, **kwargs}).encode("utf-8")
         messages = []
         for peer in self._peers.values():
             if peer.box is None:
@@ -210,7 +215,11 @@ class E2ESession:
     def decrypt(
         self, origin_id: int, ciphertext_b64: str, nonce_b64: str
     ) -> tuple[str, dict[str, Any]] | None:
-        """Decrypt an e2e_data message. Returns (message_type, kwargs) or None."""
+        """Decrypt an e2e_data message. Returns (message_type, kwargs) or None.
+
+        Verifies that the '_from' field inside the decrypted payload matches
+        the outer 'origin' set by the server. A mismatch indicates tampering.
+        """
         peer = self._peers.get(origin_id)
         if peer is None or peer.box is None:
             log.warning(f"E2E: No key for peer {origin_id}, cannot decrypt")
@@ -221,6 +230,14 @@ class E2ESession:
             plaintext = peer.box.decrypt(ciphertext, nonce)
             obj = json.loads(plaintext.decode("utf-8"))
             msg_type = obj.pop("type")
+            # Verify sender authenticity: _from inside payload must match origin
+            inner_from = obj.pop("_from", None)
+            if inner_from is not None and inner_from != origin_id:
+                log.warning(
+                    f"E2E: Origin mismatch — outer origin={origin_id}, inner _from={inner_from}. "
+                    "Possible tampering, rejecting message."
+                )
+                return None
             return (msg_type, obj)
         except Exception:
             log.warning(
@@ -376,9 +393,13 @@ def _handleE2EData(self, ciphertext, nonce, origin, to, **kwargs):
         extensionPoint.notify(**msg_kwargs)
 
 def sendEncrypted(self, type: RemoteMessageType, **kwargs):
-    """Send a message, encrypting it if E2E is active."""
-    if self.e2e is not None and self.e2e.peer_ids:
-        for msg in self.e2e.encrypt(type.value, **kwargs):
+    """Send a message, encrypting it if E2E is active.
+
+    Includes self._myUserId as '_from' inside the encrypted payload
+    so the receiver can verify sender authenticity.
+    """
+    if self.e2e is not None and self.e2e.peer_ids and self._myUserId is not None:
+        for msg in self.e2e.encrypt(type.value, from_id=self._myUserId, **kwargs):
             self.transport.send(RemoteMessageType.E2E_DATA, **msg)
     else:
         self.transport.send(type, **kwargs)
