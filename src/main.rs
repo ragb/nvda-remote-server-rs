@@ -85,7 +85,7 @@ async fn main() -> Result<()> {
         .context("Failed to build TLS config")?;
 
     let acceptor = TlsAcceptor::from(Arc::new(tls_config));
-    let state = ServerState::new(config.motd);
+    let state = ServerState::new(config.motd, config.e2e.allow);
 
     let mut listeners = Vec::new();
 

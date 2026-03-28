@@ -5,7 +5,7 @@
 
 A high-performance NVDA Remote relay server written in Rust.
 
-This is a drop-in replacement for the [Python NVDA Remote server](https://github.com/jmdaweb/NVDARemoteServer), compatible with the [NVDA Remote](https://nvdaremote.com/) client addon (protocol v1 and v2).
+This is a drop-in replacement for the [Python NVDA Remote server](https://github.com/jmdaweb/NVDARemoteServer), compatible with the [NVDA Remote](https://nvdaremote.com/) client (protocol v1 and v2), with proposed v3 E2E encryption support.
 
 ## What it does
 
@@ -13,7 +13,7 @@ The NVDA Remote relay server connects NVDA screen reader users over the internet
 
 ## Features
 
-- Full NVDA Remote protocol support (v1 and v2)
+- Full NVDA Remote protocol support (v1, v2, and proposed v3 with E2E encryption)
 - TLS with auto-generated self-signed certificates
 - Channel key generation (9-digit codes)
 - Message of the day (MOTD)
@@ -87,6 +87,28 @@ The server implements the NVDA Remote relay protocol:
 
 The server does not parse relayed message content -- it forwards key events, speech, braille, clipboard, and any other message types as-is.
 
+### Protocol v3: End-to-End Encryption (proposed)
+
+> **Status**: Protocol v3 is a proposed extension. The server side is implemented and ready, but the NVDA client side has not been implemented yet and no PR has been submitted to NVDA. This is a design proposal — the protocol may change based on feedback from the NVDA community.
+
+Protocol v3 adds end-to-end encryption (E2E) support so the relay server cannot read user data. Clients that send `protocol_version: 3` are marked as `e2e_supported: true` in their `ClientInfo`. The server:
+
+- Exposes `e2e_supported` per client in `channel_joined`, `client_joined`, `client_left`
+- Includes `e2e_available` in `channel_joined` (configurable via `[e2e] allow` in config)
+- Includes `user_id` in `channel_joined` (client's own assigned ID)
+- Relays `e2e_pubkey` and `e2e_data` messages opaquely (no crypto on the server)
+
+E2E is all-or-nothing: if any peer in the channel doesn't support E2E, the entire channel operates in plaintext. The server does zero cryptographic work — it only reports peer capabilities. All encryption uses X25519 key exchange and XChaCha20-Poly1305, implemented client-side.
+
+Configuration:
+
+```toml
+[e2e]
+allow = true  # Set to false to disable E2E (e2e_available will be false in channel_joined)
+```
+
+See [docs/e2e-encryption.md](docs/e2e-encryption.md) for the full protocol specification, security properties, and Signal protocol comparison.
+
 ## Docker
 
 Pre-built images are available on GitHub Container Registry:
@@ -152,7 +174,7 @@ The Rust server handles 5,000+ concurrent session pairs. The other servers strug
 cargo test
 ```
 
-52 tests: 34 unit tests (protocol serialization, server state, message transforms) and 18 integration tests simulating real NVDA client flows.
+70 tests: 34 unit tests (protocol serialization, server state, message transforms), 25 integration tests simulating real NVDA client flows, and 11 E2E crypto tests (key exchange, encrypted relay, attack scenarios).
 
 ## License
 

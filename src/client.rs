@@ -58,7 +58,9 @@ impl ClientSession {
             return;
         }
 
-        info!(channel = %channel, connection_type = ?connection_type, "Joining channel");
+        let e2e_supported = self.protocol_version >= 3;
+
+        info!(channel = %channel, connection_type = ?connection_type, e2e_supported, "Joining channel");
 
         let member = ChannelMember {
             id: self.id,
@@ -76,8 +78,10 @@ impl ClientSession {
 
         self.send(&ServerMessage::ChannelJoined {
             channel: channel.clone(),
+            user_id: self.id,
             user_ids: existing_ids,
             clients: existing_clients,
+            e2e_available: self.state.e2e_available,
         });
 
         if self.state.motd.always_send || !self.state.motd.message.is_empty() {
@@ -95,6 +99,7 @@ impl ClientSession {
                 client: ClientInfo {
                     id: self.id,
                     connection_type,
+                    e2e_supported,
                 },
             },
         );
@@ -106,9 +111,15 @@ impl ClientSession {
     fn handle_relay(&self, raw_message: &str) {
         if let Some(ref channel) = self.channel {
             let forwarded = add_origin(raw_message, self.id);
-            debug!(channel = %channel, "Relaying message");
-            self.state
-                .broadcast_to_channel(channel, self.id, &forwarded);
+            // If the message has a "to" field, forward only to that specific client
+            if let Some(target_id) = extract_to_field(raw_message) {
+                debug!(channel = %channel, target = target_id, "Targeted relay");
+                self.state.send_to_client(channel, target_id, &forwarded);
+            } else {
+                debug!(channel = %channel, "Relaying message");
+                self.state
+                    .broadcast_to_channel(channel, self.id, &forwarded);
+            }
         }
     }
 
@@ -126,6 +137,7 @@ impl ClientSession {
                     client: ClientInfo {
                         id: self.id,
                         connection_type: member.connection_type,
+                        e2e_supported: member.protocol_version >= 3,
                     },
                 },
             );
@@ -249,6 +261,14 @@ fn spawn_ping(tx: mpsc::UnboundedSender<String>) -> JoinHandle<()> {
             }
         }
     })
+}
+
+/// Extract the `to` field from a raw JSON message, if present.
+/// Used for targeted forwarding — when `to` is set, the message goes only to that user_id.
+fn extract_to_field(message: &str) -> Option<u64> {
+    serde_json::from_str::<serde_json::Value>(message)
+        .ok()
+        .and_then(|v| v.get("to")?.as_u64())
 }
 
 /// Add `origin` field to a forwarded message for protocol v2 clients.
