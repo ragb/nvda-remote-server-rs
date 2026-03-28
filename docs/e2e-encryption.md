@@ -21,7 +21,7 @@ This E2E extension applies **only to relay server connections** — where a thir
 def _handleChannelJoined(self, channel, user_id, user_ids, clients, e2e_available=False, **kwargs):
     all_peers_e2e = all(c.get("e2e_supported") for c in clients) if clients else True
     if e2e_available and all_peers_e2e:
-        self.e2e = E2ESession()
+        self.e2e = E2ESession(channel_key=self._channelKey)
         self.transport.send(RemoteMessageType.E2E_PUBKEY, **self.e2e.get_pubkey_message())
     else:
         self.e2e = None  # Direct connection, legacy server, or non-E2E peers present
@@ -31,12 +31,15 @@ This way the client doesn't need to inspect its own transport type — it reads 
 
 ## Overview
 
-This design uses the same well-known cryptographic primitives as Signal (X25519, authenticated encryption, fingerprint verification) but is intentionally much simpler. Signal solves harder problems — offline messaging, persistent identity, per-message forward secrecy — that don't apply to a real-time screen reader relay with 2–4 simultaneous clients. See [Design compromises vs Signal protocol](#design-compromises-vs-signal-protocol) for a detailed comparison of every tradeoff and why it's acceptable for NVDA Remote.
+This design uses well-known cryptographic primitives (X25519, HKDF, SecretBox) to provide end-to-end encryption with a key design insight: **the channel key itself is used as a shared secret for key derivation**, making MITM attacks cryptographically impossible without knowing the channel key.
 
-- **Key exchange**: Pairwise X25519 Diffie-Hellman between each pair of clients
-- **Encryption**: XChaCha20-Poly1305 authenticated encryption
-- **Channel size**: Optimized for 2–4 clients (pairwise keys scale fine at this size)
-- **Library**: `PyNaCl` (Python binding to libsodium) — provides X25519, XChaCha20-Poly1305, and BLAKE2b in a single dependency
+- **No persistent identity keys**: The design has no Ed25519 keys, no TOFU, no fingerprints. The channel key (shared out-of-band between users) serves as the authentication root.
+- **Channel key hashing**: The channel key is hashed with SHA-256 before being sent to the server in the `join` message. The server never sees the real channel key.
+- **Key exchange**: Pairwise X25519 Diffie-Hellman between each pair of clients, using ephemeral keys generated per session.
+- **Key derivation**: `HKDF-SHA256(DH_shared_secret, channel_key, "nvda-remote-e2e")` — the channel key is mixed into the derived encryption key as salt, so even if a MITM substitutes ephemeral public keys, they cannot derive the correct encryption key without knowing the real channel key.
+- **Encryption**: SecretBox (XSalsa20-Poly1305) authenticated encryption with the HKDF-derived key.
+- **Channel size**: Optimized for 2-4 clients (pairwise keys scale fine at this size).
+- **Library**: `PyNaCl` (Python binding to libsodium) — provides X25519, SecretBox (XSalsa20-Poly1305), and HKDF in a single dependency. Standard library `hashlib` provides SHA-256.
 
 ## Server protocol support
 
@@ -49,6 +52,19 @@ E2E requires protocol version 3. The version number gates capability:
 - **v3**: adds E2E encryption support (extensible for future capabilities without another version bump)
 
 Clients that send `{"type": "protocol_version", "version": 3}` are marked as `e2e_supported: true` in `ClientInfo`. The server derives this from the version number — no extra fields needed in `join`.
+
+### Channel key hashing
+
+Clients hash the channel key with SHA-256 before sending it to the server in the `join` message:
+
+```python
+import hashlib
+
+channel_hash = hashlib.sha256(channel_key.encode("utf-8")).hexdigest()
+transport.send(RemoteMessageType.JOIN, channel=channel_hash, connection_type=connection_type)
+```
+
+The server uses the hash to group clients into channels but never learns the real channel key. This is critical for E2E security — the channel key is later used in HKDF key derivation, so the server cannot derive the encryption keys even if it substitutes ephemeral public keys during key exchange.
 
 ### All-or-nothing E2E
 
@@ -110,42 +126,77 @@ Create `source/_remoteClient/e2e.py` to hold all crypto logic:
 ```python
 """End-to-end encryption for NVDA Remote.
 
-Uses X25519 key exchange and XChaCha20-Poly1305 authenticated encryption
-to protect data-plane messages (keystrokes, speech, braille, clipboard)
-from the relay server.
+Uses ephemeral X25519 key exchange with HKDF channel-key binding and
+SecretBox (XSalsa20-Poly1305) authenticated encryption to protect
+data-plane messages (keystrokes, speech, braille, clipboard) from the
+relay server.
+
+The channel key (shared out-of-band between users) is mixed into key
+derivation via HKDF, making MITM impossible without knowing the real
+channel key. No persistent identity keys or TOFU are needed.
 
 Requires PyNaCl (libsodium Python binding).
 """
 
 import base64
+import hashlib
 import json
 import os
 import struct
 from typing import Any
 
-from nacl.public import PrivateKey, PublicKey, Box
+from nacl.public import PrivateKey, PublicKey
+from nacl.secret import SecretBox
 from nacl.utils import random as nacl_random
+from nacl.bindings import crypto_scalarmult
 from logHandler import log
+
+
+def hash_channel_key(channel_key: str) -> str:
+    """Hash the channel key with SHA-256 for use in the JOIN message.
+
+    The server never sees the real channel key.
+    """
+    return hashlib.sha256(channel_key.encode("utf-8")).hexdigest()
+
+
+def _hkdf_sha256(ikm: bytes, salt: bytes, info: bytes, length: int = 32) -> bytes:
+    """HKDF-SHA256 key derivation (RFC 5869)."""
+    import hmac
+    # Extract
+    prk = hmac.new(salt, ikm, hashlib.sha256).digest()
+    # Expand
+    t = b""
+    okm = b""
+    for i in range(1, (length + 31) // 32 + 1):
+        t = hmac.new(prk, t + info + bytes([i]), hashlib.sha256).digest()
+        okm += t
+    return okm[:length]
 
 
 class PeerKeyState:
     """Tracks the E2E state for a single peer."""
 
-    __slots__ = ("peer_id", "public_key", "nonce_prefix", "box", "send_counter")
+    __slots__ = ("peer_id", "public_key", "nonce_prefix", "secret_box", "send_counter")
 
     def __init__(self, peer_id: int, public_key: PublicKey, nonce_prefix: bytes):
         self.peer_id = peer_id
         self.public_key = public_key
         self.nonce_prefix = nonce_prefix
-        self.box: Box | None = None  # Set after we derive the shared key
+        self.secret_box: SecretBox | None = None  # Set after we derive the shared key
         self.send_counter: int = 0
 
 
 class E2ESession:
     """Manages E2E encryption for one channel session.
 
+    Each session generates an ephemeral X25519 keypair. The channel key
+    (known only to the clients, not the server) is used as HKDF salt
+    during key derivation, binding the encryption to knowledge of the
+    real channel key.
+
     Usage:
-        session = E2ESession()
+        session = E2ESession(channel_key="123456789")
         # After joining, broadcast your public key:
         pubkey_msg = session.get_pubkey_message()
         transport.send(RemoteMessageType.E2E_PUBKEY, **pubkey_msg)
@@ -161,8 +212,9 @@ class E2ESession:
         msg_type, kwargs = session.decrypt(origin_id, ciphertext_b64, nonce_b64)
     """
 
-    def __init__(self) -> None:
-        self._private_key = PrivateKey.generate()
+    def __init__(self, channel_key: str) -> None:
+        self._channel_key = channel_key.encode("utf-8")  # Real channel key (never sent to server)
+        self._private_key = PrivateKey.generate()  # Ephemeral X25519
         self._public_key = self._private_key.public_key
         self._nonce_prefix = nacl_random(4)  # 4 bytes, unique per session
         self._peers: dict[int, PeerKeyState] = {}
@@ -176,7 +228,12 @@ class E2ESession:
         return base64.b64encode(self._nonce_prefix).decode("ascii")
 
     def get_pubkey_message(self) -> dict[str, str]:
-        """Returns kwargs for transport.send(RemoteMessageType.E2E_PUBKEY, **kwargs)."""
+        """Returns kwargs for transport.send(RemoteMessageType.E2E_PUBKEY, **kwargs).
+
+        The message contains only the ephemeral public key and nonce prefix.
+        No identity keys or signatures — the channel key binding in HKDF
+        provides authentication.
+        """
         return {
             "pubkey": self.public_key_b64,
             "nonce_prefix": self.nonce_prefix_b64,
@@ -185,12 +242,25 @@ class E2ESession:
     def add_peer(self, peer_id: int, pubkey_b64: str, nonce_prefix_b64: str) -> None:
         """Process a received e2e_pubkey message from a peer.
 
-        Derives the shared secret and stores the pairwise encryption box.
+        Performs X25519 DH, then derives the encryption key via HKDF with
+        the channel key as salt. Stores a SecretBox for pairwise encryption.
         """
-        peer_pubkey = PublicKey(base64.b64decode(pubkey_b64))
+        ephemeral_pubkey_bytes = base64.b64decode(pubkey_b64)
+        peer_pubkey = PublicKey(ephemeral_pubkey_bytes)
         nonce_prefix = base64.b64decode(nonce_prefix_b64)
+        # X25519 DH to get shared secret
+        dh_shared_secret = crypto_scalarmult(
+            bytes(self._private_key), bytes(peer_pubkey)
+        )
+        # HKDF: derive encryption key using channel key as salt
+        derived_key = _hkdf_sha256(
+            ikm=dh_shared_secret,
+            salt=self._channel_key,
+            info=b"nvda-remote-e2e",
+            length=32,
+        )
         peer = PeerKeyState(peer_id, peer_pubkey, nonce_prefix)
-        peer.box = Box(self._private_key, peer_pubkey)
+        peer.secret_box = SecretBox(derived_key)
         self._peers[peer_id] = peer
         log.debug(f"E2E: Established pairwise key with peer {peer_id}")
 
@@ -206,14 +276,14 @@ class E2ESession:
         return list(self._peers.keys())
 
     def _make_nonce(self, peer: PeerKeyState) -> bytes:
-        """Build a 24-byte nonce: 4-byte sender prefix + 4-byte zero pad + 8-byte counter.
+        """Build a 24-byte nonce: 4-byte sender prefix + 12-byte zero pad + 8-byte counter.
 
-        XChaCha20-Poly1305 uses 24-byte nonces (vs 12 for regular ChaCha20-Poly1305),
-        making random/prefixed nonces safe against collision.
+        XSalsa20-Poly1305 uses 24-byte nonces, making prefixed nonces safe
+        against collision.
         """
         counter_bytes = struct.pack(">Q", peer.send_counter)
         peer.send_counter += 1
-        # 4 (prefix) + 12 (padding + counter) = 24 bytes for XChaCha20-Poly1305
+        # 4 (prefix) + 12 (padding) + 8 (counter) = 24 bytes for XSalsa20-Poly1305
         return self._nonce_prefix + b"\x00" * 12 + counter_bytes
 
     def encrypt(self, type: str, **kwargs: Any) -> list[dict[str, Any]]:
@@ -227,10 +297,10 @@ class E2ESession:
         plaintext = json.dumps({"type": type, **kwargs}).encode("utf-8")
         messages = []
         for peer in self._peers.values():
-            if peer.box is None:
+            if peer.secret_box is None:
                 continue
             nonce = self._make_nonce(peer)
-            ciphertext = peer.box.encrypt(plaintext, nonce).ciphertext
+            ciphertext = peer.secret_box.encrypt(plaintext, nonce).ciphertext
             messages.append({
                 "to": peer.peer_id,
                 "ciphertext": base64.b64encode(ciphertext).decode("ascii"),
@@ -244,37 +314,19 @@ class E2ESession:
         Returns (message_type, kwargs) or None if decryption fails.
         """
         peer = self._peers.get(origin_id)
-        if peer is None or peer.box is None:
+        if peer is None or peer.secret_box is None:
             log.warning(f"E2E: No key for peer {origin_id}, cannot decrypt")
             return None
         try:
             ciphertext = base64.b64decode(ciphertext_b64)
             nonce = base64.b64decode(nonce_b64)
-            plaintext = peer.box.decrypt(ciphertext, nonce)
+            plaintext = peer.secret_box.decrypt(ciphertext, nonce)
             obj = json.loads(plaintext.decode("utf-8"))
             msg_type = obj.pop("type")
             return (msg_type, obj)
         except Exception:
             log.warning(f"E2E: Decryption failed for message from peer {origin_id}", exc_info=True)
             return None
-
-    def get_fingerprint(self, peer_id: int) -> str | None:
-        """Compute a verification fingerprint for a pairwise key.
-
-        Both sides get the same fingerprint because we sort the public keys.
-        Users compare this out-of-band (phone call, separate chat) to detect MITM.
-
-        Returns a hex string like "a3f2 91d0 e8c4 7b5a" or None if peer unknown.
-        """
-        peer = self._peers.get(peer_id)
-        if peer is None:
-            return None
-        keys = sorted([bytes(self._public_key), bytes(peer.public_key)])
-        # Use BLAKE2b (available in libsodium/PyNaCl) for the fingerprint hash
-        import hashlib
-        digest = hashlib.blake2b(keys[0] + keys[1], digest_size=8).hexdigest()
-        # Format as groups of 4 hex chars: "a3f2 91d0 e8c4 7b5a"
-        return " ".join(digest[i:i+4] for i in range(0, len(digest), 4))
 ```
 
 ### Step 3: Integrate into the transport layer
@@ -286,7 +338,7 @@ The cleanest approach is to add E2E as a layer inside the session, not the trans
 In `session.py`, the `RemoteSession` base class is where to hook E2E:
 
 ```python
-from ._remoteClient.e2e import E2ESession
+from ._remoteClient.e2e import E2ESession, hash_channel_key
 from ._remoteClient.protocol import RemoteMessageType
 
 class RemoteSession:
@@ -313,7 +365,7 @@ class RemoteSession:
         """After joining, init E2E if the server allows it and all peers support it."""
         self._e2eAvailable = e2e_available
         if self._canDoE2E(clients):
-            self.e2e = E2ESession()
+            self.e2e = E2ESession(channel_key=self._channelKey)
             self.transport.send(RemoteMessageType.E2E_PUBKEY, **self.e2e.get_pubkey_message())
         else:
             self.e2e = None
@@ -337,9 +389,10 @@ class RemoteSession:
             self.e2e.remove_peer(user_id)
 
     def _handleE2EPubkey(self, pubkey, nonce_prefix, origin, **kwargs):
-        """Process a peer's public key and derive the shared secret."""
-        if self.e2e is not None:
-            self.e2e.add_peer(origin, pubkey, nonce_prefix)
+        """Process a peer's public key and derive the pairwise encryption key."""
+        if self.e2e is None:
+            return
+        self.e2e.add_peer(origin, pubkey, nonce_prefix)
 
     def _handleE2EData(self, ciphertext, nonce, origin, to, **kwargs):
         """Decrypt an E2E message and dispatch the inner message."""
@@ -404,17 +457,22 @@ The session needs to know its own `user_id` to filter `e2e_data` messages addres
 
 See "Server addition" section below.
 
-### Step 6: Fingerprint verification UI
+### Step 6: Hash channel key before sending to server
 
-Add a dialog or NVDA message that shows the fingerprint for each E2E peer:
+The `join` message must send the SHA-256 hash of the channel key, not the raw key:
 
 ```python
-fingerprint = self.e2e.get_fingerprint(peer_id)
-# Display via NVDA speech/UI:
-# "Security fingerprint for peer 5: alpha 3 foxtrot 2 nine 1 delta 0"
+from ._remoteClient.e2e import hash_channel_key
+
+# When joining a channel:
+channel_hash = hash_channel_key(channel_key)
+transport.send(RemoteMessageType.JOIN, channel=channel_hash, connection_type=connection_type)
+
+# Store the real channel key for E2E key derivation:
+self._channelKey = channel_key
 ```
 
-Users compare fingerprints out-of-band (phone, separate chat). If they match, no MITM. Optionally implement trust-on-first-use (TOFU): store the fingerprint and warn if it changes.
+The server groups clients by the hashed channel value. Since the server never sees the real channel key, it cannot derive the HKDF-derived encryption keys even if it performs a MITM attack on the ephemeral key exchange.
 
 ## Server changes summary (already implemented)
 
@@ -438,6 +496,18 @@ The server derives `e2e_supported = protocol_version >= 3` for each client. No e
 - **`user_id`**: The client's own assigned ID — needed so it can filter `e2e_data` messages addressed to it via the `to` field.
 - **`e2e_available`**: Server-level flag (configurable via `[e2e] allow` in `config.toml`, env: `NVDAREMOTE__E2E__ALLOW`). When `false`, clients should not initiate E2E. The NVDA direct-connection server (`server.py`) should set this to `false` (or omit it — clients should default to `false`).
 
+### `to`-based targeted forwarding
+
+When any relayed message includes a `to` field, the server forwards it only to the peer with that `user_id` instead of broadcasting to all channel members. If `to` is absent, the server broadcasts as usual (v2 behavior).
+
+This is used by `e2e_data` messages, which are encrypted per-peer — only the addressed peer can decrypt them. Targeted forwarding avoids sending useless ciphertext to peers who cannot decrypt it.
+
+```json
+{"type": "e2e_data", "to": 2, "ciphertext": "...", "nonce": "..."}
+```
+
+The server reads `to`, finds the client with that `user_id` in the channel, and forwards only to them (adding `origin` as usual). If no client with that ID exists, the message is silently dropped.
+
 ### Protocol version semantics
 
 - **v1**: bare protocol
@@ -455,6 +525,7 @@ When a v3 client joins a channel and sees any peer with `e2e_supported: false`, 
 3. **Optionally refuse**: If the user requires encryption, disconnect or reject the session.
 
 When a v2 client joins a channel where v3 clients already have E2E active:
+
 - The v3 clients receive `client_joined` with `e2e_supported: false`
 - They should **tear down E2E** and warn the user that encryption is no longer possible
 - All subsequent messages are plaintext
@@ -463,18 +534,31 @@ This is a client-side policy decision. The server just reports `e2e_supported` p
 
 ## Security properties
 
+### Why MITM is cryptographically impossible
+
+The key insight of this design is that the **channel key is used as HKDF salt** during key derivation:
+
+```text
+derived_key = HKDF-SHA256(DH_shared_secret, channel_key, "nvda-remote-e2e")
+```
+
+A MITM attacker (including a malicious relay server operator) who substitutes ephemeral public keys during key exchange would successfully complete two separate DH exchanges — one with each client. However, the attacker does not know the real channel key (the server only receives a SHA-256 hash of it). Without the real channel key, the attacker derives different encryption keys than the legitimate clients, and all encrypted messages fail authentication (Poly1305 MAC verification).
+
+This eliminates the need for persistent identity keys, signatures, TOFU, or fingerprint verification. The channel key — which users share out-of-band — serves as the authentication root.
+
 ### Protected
+
 - All data-plane content (keystrokes, speech, braille, clipboard) between E2E peers
 - Forward secrecy (ephemeral keys per session)
-- **Sender authenticity via pairwise keys**: each peer pair has a unique shared secret. If the server lies about the `origin` field on the outer `e2e_data` envelope, decryption fails because the receiver would use the wrong pairwise key and AEAD authentication rejects the ciphertext. This means a passive or semi-active server cannot forge sender identity.
+- **MITM resistance via channel key binding**: even a malicious server operator cannot decrypt or forge messages without knowing the real channel key
+- **Sender authenticity via pairwise keys**: each peer pair has a unique shared secret. If the server lies about the `origin` field on the outer `e2e_data` envelope, decryption fails because the receiver would use the wrong pairwise key and AEAD authentication rejects the ciphertext.
 
 ### The `origin` field and server trust
 
 The relay server adds an `origin` field to all relayed messages (including `e2e_data`). This `origin` is **untrusted metadata** — it's set by the server, not the sender. In our design:
 
 - The **outer** `origin` on `e2e_data` is used only for pairwise key lookup (which peer's key to use for decryption).
-- If the server sets a wrong `origin`, the receiver uses the wrong key → AEAD decryption fails → message is rejected. The server cannot trick a client into accepting a forged message.
-- In a **full MITM** scenario (server substituted keys during exchange), the server has its own pairwise keys with each client and can set `origin` correctly for its fake sessions. This is detectable only via fingerprint verification.
+- If the server sets a wrong `origin`, the receiver uses the wrong key and AEAD decryption fails, so the message is rejected. The server cannot trick a client into accepting a forged message.
 
 **Recommendation for clients**: include the sender's `user_id` inside the encrypted payload as an additional authenticity check. The receiver can then verify that the decrypted sender ID matches the outer `origin`. This is defense-in-depth — the pairwise AEAD already prevents forgery, but the inner ID makes the authentication explicit and auditable. Example:
 
@@ -486,9 +570,10 @@ The relay server adds an `origin` field to all relayed messages (including `e2e_
 The `_from` field is set by the sender before encryption. The receiver checks `_from == origin` after decryption. A mismatch indicates tampering.
 
 ### Not protected
+
 - **Metadata**: server sees who is in which channel, timing, message sizes
-- **Control plane**: `join`, `protocol_version`, `generate_key` stay cleartext
-- **MITM**: a malicious server can swap pubkeys during exchange — detectable only via fingerprint verification
+- **Control plane**: `join`, `protocol_version`, `generate_key` stay cleartext (but channel key is hashed before sending)
+- **Weak channel keys**: if the channel key has low entropy (e.g., a short numeric string), a server operator could brute-force the SHA-256 hash to recover it. Use of `generate_key` (9-digit numeric) provides approximately 30 bits of entropy. For higher security, users should use longer, more random channel keys.
 
 ## Design compromises vs Signal protocol
 
@@ -497,24 +582,24 @@ This E2E design is intentionally simpler than the Signal protocol. The table bel
 ### Comparison at a glance
 
 | Property | Signal | NVDA Remote E2E | Gap acceptable? |
-|----------|--------|-----------------|-----------------|
-| Key exchange | X3DH (triple DH with identity keys, signed prekeys, one-time prekeys) | Single ephemeral X25519 DH | Yes — see below |
+| -------- | ------ | --------------- | --------------- |
+| Key exchange | X3DH (triple DH with identity keys, signed prekeys, one-time prekeys) | Single ephemeral X25519 DH + HKDF channel-key binding | Yes — see below |
 | Message encryption | Double Ratchet (DH ratchet + symmetric ratchet) | Static session key + counter nonce | Yes — see below |
 | Forward secrecy | Per-message | Per-session | Yes — see below |
 | Offline messaging | Prekey bundles allow E2E before peer is online | Not supported — both peers must be online | Yes — see below |
-| Identity persistence | Long-term identity keys stored across sessions | None — ephemeral only | Acceptable — see below |
+| MITM protection | Identity keys + safety numbers | Channel key binding in HKDF (cryptographic, not trust-based) | Yes — arguably stronger for this use case |
 | Group messaging | Sender Keys with group ratchet | Pairwise keys (O(n^2)) | Yes — see below |
 | Post-compromise security | Double Ratchet self-heals after key compromise | No self-healing within a session | Acceptable — see below |
 
 ### Detailed rationale for each compromise
 
-#### 1. No X3DH — single DH instead
+#### 1. No X3DH — single DH with channel-key binding instead
 
 **What Signal does**: X3DH uses three DH operations combining a long-term identity key, a medium-term signed prekey, and one-time prekeys. This provides authentication (you know who you're talking to), offline initiation (start E2E without the peer being online), and forward secrecy even for the first message.
 
-**What we do**: A single ephemeral X25519 DH exchange after both clients join the channel.
+**What we do**: A single ephemeral X25519 DH exchange after both clients join the channel, with the channel key mixed into key derivation via HKDF.
 
-**Why this is fine**: NVDA Remote is a real-time relay. Both clients are always online when communicating — there is no "send a message and the other person reads it later" use case. The identity key problem (knowing *who* you're talking to) is handled out-of-band via fingerprint verification, which is the same trust model Signal falls back to anyway (safety numbers). X3DH's prekey server infrastructure would add significant complexity for zero benefit.
+**Why this is fine**: NVDA Remote is a real-time relay. Both clients are always online when communicating. Authentication comes from knowledge of the channel key (shared out-of-band), which is mixed into HKDF key derivation. A MITM who does not know the channel key derives different encryption keys and cannot decrypt or forge messages.
 
 **Cost to close the gap**: Would require a key server, persistent identity keys on each NVDA installation, and a signed prekey rotation scheme. Not worth it for a real-time relay.
 
@@ -522,7 +607,7 @@ This E2E design is intentionally simpler than the Signal protocol. The table bel
 
 **What Signal does**: The Double Ratchet advances the encryption key after every message using both a DH ratchet (new DH exchange periodically) and a symmetric ratchet (hash chain). This means each message has a unique key, and compromising one key doesn't reveal other messages.
 
-**What we do**: One DH exchange per session produces a static key. All messages in the session use that key with an incrementing nonce.
+**What we do**: One DH exchange per session produces a static key (via HKDF). All messages in the session use that key with an incrementing nonce.
 
 **Why this is fine**: NVDA Remote sessions are short-lived (minutes to hours of screen reader use). The threat model is protecting against a passive server operator logging traffic — not against an attacker who somehow extracts the session key from a client's memory mid-session. If an attacker can read process memory, they can read the screen reader output directly. The session key lives only in RAM and is discarded on disconnect.
 
@@ -548,15 +633,13 @@ This E2E design is intentionally simpler than the Signal protocol. The table bel
 
 **Cost to close the gap**: Would require server-side message storage, prekey bundles, and identity management. Fundamentally changes the relay architecture for no practical benefit.
 
-#### 5. No persistent identity keys
+#### 5. Channel key binding instead of identity keys
 
-**What Signal provides**: Each device has a long-term identity key that persists across sessions. This allows trust continuity — if you verified a safety number once, it stays valid until the other person changes devices.
+**What Signal provides**: Each device has a long-term identity key registered with a central key server. Users verify "safety numbers" (fingerprints) out-of-band to detect MITM.
 
-**What we do**: Ephemeral keys only. Each session generates a new keypair. Fingerprints change every session.
+**What we do**: The channel key (shared out-of-band between users) is mixed into HKDF key derivation. A MITM attacker who does not know the real channel key cannot derive the correct encryption keys. No persistent identity keys, no TOFU, no fingerprint verification needed.
 
-**Why this is fine for now**: NVDA Remote users typically connect to the same small set of people. Verifying a fingerprint each session is a minor inconvenience for 2-4 person channels. The alternative (persistent identity keys) would require secure key storage on each NVDA installation, key backup/restore mechanisms, and key change notifications — significant complexity.
-
-**Future improvement path**: Implement trust-on-first-use (TOFU) — store the peer's public key after first verification and warn if it changes. This gives Signal-like trust continuity without the full identity key infrastructure. The NVDA config system (`configuration.py`) already stores trusted TLS certificate fingerprints, so the pattern exists.
+**Why this is arguably stronger for this use case**: Signal's TOFU model trusts the first connection and relies on users noticing safety number changes. Most users never verify safety numbers. In contrast, our channel-key binding provides cryptographic MITM resistance from the very first connection — no user action required beyond sharing the channel key, which they already do to connect at all.
 
 #### 6. Pairwise keys instead of group protocol
 
@@ -579,12 +662,13 @@ This E2E design is intentionally simpler than the Signal protocol. The table bel
 ### Summary
 
 These compromises are acceptable because NVDA Remote is:
+
 - **Real-time only** — no offline messaging, no stored messages
 - **Short sessions** — minutes to hours, not weeks
 - **Small groups** — 2-4 clients, not hundreds
 - **Same trust boundary** — if you compromise the client, you have everything anyway
 
-The design protects against the primary threat: **an honest-but-curious server operator logging relay traffic**. For that threat, single-DH with ephemeral keys and authenticated encryption is sufficient and well-understood.
+The design protects against the primary threat: **a relay server operator who can observe and modify traffic**. Channel-key binding in HKDF makes MITM cryptographically impossible without knowing the channel key, and ephemeral keys provide forward secrecy per session.
 
 If stronger guarantees are needed later, the most impactful upgrade would be adding a **symmetric ratchet** (client-side only change, no protocol change) to get per-message forward secrecy.
 
@@ -592,7 +676,7 @@ If stronger guarantees are needed later, the most impactful upgrade would be add
 
 Add `PyNaCl` to NVDA's dependencies. PyNaCl bundles libsodium as a compiled binary, so it works on Windows without extra setup:
 
-```
+```sh
 pip install pynacl
 ```
 
@@ -600,21 +684,24 @@ PyNaCl is well-maintained, widely used (by Paramiko, Matrix, etc.), and provides
 
 ## Example message flow
 
-```
+```text
 Client A (master, v3)              Server (relay)             Client B (slave, v3)
 ─────────────────────              ──────────────             ────────────────────
 protocol_version(3) ──────→
-join("room","master") ────→
+join(SHA256("room"),"master") ─→
                      ←────── channel_joined(e2e_available=true, peers=[])
                                                              protocol_version(3) ──────→
-                                                             join("room","slave") ─────→
+                                                             join(SHA256("room"),"slave") ─→
                      ←── client_joined(id=2,e2e=true)        ←── channel_joined(peers=[{id=1,e2e=true}])
 
-e2e_pubkey(pk_a,np_a) ───→ relay with origin=1 ──────────→  add_peer(1, pk_a, np_a)
-                     ←──────────── relay with origin=2 ←──── e2e_pubkey(pk_b,np_b)
+e2e_pubkey(pk_a, np_a) ────────→ relay(origin=1) ─────────→ add_peer(1, pk_a, np_a)
+                                                             DH + HKDF(dh_secret, "room", "nvda-remote-e2e")
+                     ←── relay(origin=2) ← e2e_pubkey(pk_b, np_b)
 add_peer(2, pk_b, np_b)
+DH + HKDF(dh_secret, "room", "nvda-remote-e2e")
 
-[Both now have pairwise Box(private_self, public_peer)]
+[Both now have pairwise SecretBox(HKDF-derived key)]
+[Server cannot derive key — it never saw the real channel key "room"]
 
 e2e_data(to=2,ct,n) ─────→ relay (opaque blob) ──────────→  decrypt → {"type":"key","vk_code":65}
                      ←────────────── relay (opaque) ←──────  e2e_data(to=1,ct,n)

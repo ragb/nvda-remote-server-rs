@@ -140,6 +140,26 @@ impl ServerState {
         }
     }
 
+    /// Send a message to a specific client in a channel by user_id.
+    /// Used for `to`-based targeted forwarding (e.g. e2e_data messages).
+    /// Returns true if the target was found and the message was sent.
+    pub fn send_to_client(&self, channel_name: &str, target_id: u64, message: &str) -> bool {
+        if let Some(channel) = self.channels.get(channel_name) {
+            for member in &channel.members {
+                if member.id == target_id {
+                    let msg = if member.protocol_version < 2 {
+                        strip_v2_fields(message)
+                    } else {
+                        message.to_string()
+                    };
+                    let _ = member.sender.send(msg);
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// Send a server message to all members of a channel except the given client.
     pub fn notify_channel(&self, channel_name: &str, except_id: u64, msg: &ServerMessage) {
         let line = msg.to_line();

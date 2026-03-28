@@ -844,30 +844,21 @@ async fn e2e_three_clients_pairwise() {
     )
     .await;
 
-    // B receives both messages (broadcast), but can only decrypt theirs
+    // B receives only its targeted message (to-based forwarding)
     let msg = recv(&mut r2).await;
     assert_eq!(msg["to"], uid2);
     let d = b_for_a
         .decrypt(uid1, msg["ciphertext"].as_str().unwrap(), msg["nonce"].as_str().unwrap())
         .unwrap();
     assert!(d.contains("66"), "B should decrypt vk_code 66");
+    // B should NOT receive C's message — targeted forwarding skips non-addressed peers
 
-    let msg = recv(&mut r2).await;
-    assert_eq!(msg["to"], uid3);
-    // B cannot decrypt C's message (wrong pairwise key)
-    let d = b_for_a.decrypt(uid1, msg["ciphertext"].as_str().unwrap(), msg["nonce"].as_str().unwrap());
-    assert!(d.is_none(), "B must not be able to decrypt message meant for C");
-
-    // C receives both, can only decrypt theirs
-    let msg = recv(&mut r3).await;
-    assert_eq!(msg["to"], uid2);
-    let d = c_for_a.decrypt(uid1, msg["ciphertext"].as_str().unwrap(), msg["nonce"].as_str().unwrap());
-    assert!(d.is_none(), "C must not be able to decrypt message meant for B");
-
+    // C receives only its targeted message
     let msg = recv(&mut r3).await;
     assert_eq!(msg["to"], uid3);
     let d = c_for_a
         .decrypt(uid1, msg["ciphertext"].as_str().unwrap(), msg["nonce"].as_str().unwrap())
         .unwrap();
     assert!(d.contains("67"), "C should decrypt vk_code 67");
+    // C should NOT receive B's message — targeted forwarding skips non-addressed peers
 }
