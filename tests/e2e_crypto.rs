@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use chacha20poly1305::aead::{Aead, KeyInit};
+use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use hkdf::Hkdf;
 use sha2::Sha256;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream};
@@ -120,11 +120,8 @@ impl E2EClient {
 
     /// Derive shared key from peer's public key using HKDF-SHA256
     fn add_peer(&mut self, peer_id: u64, peer_pubkey_b64: &str) {
-        let peer_pubkey_bytes: [u8; 32] = BASE64
-            .decode(peer_pubkey_b64)
-            .unwrap()
-            .try_into()
-            .unwrap();
+        let peer_pubkey_bytes: [u8; 32] =
+            BASE64.decode(peer_pubkey_b64).unwrap().try_into().unwrap();
         let peer_pubkey = PublicKey::from(peer_pubkey_bytes);
 
         // X25519 DH
@@ -192,11 +189,7 @@ impl E2EClient {
 // Inline a tiny hex encoder.
 mod hex {
     pub fn encode(bytes: impl AsRef<[u8]>) -> String {
-        bytes
-            .as_ref()
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect()
+        bytes.as_ref().iter().map(|b| format!("{b:02x}")).collect()
     }
 }
 
@@ -431,8 +424,7 @@ async fn e2e_tampered_ciphertext_rejected() {
     client_b.add_peer(uid1, &pubkey_a_b64);
 
     // Encrypt
-    let (ciphertext_b64, nonce) =
-        client_a.encrypt(uid2, r#"{"type":"key","vk_code":65}"#);
+    let (ciphertext_b64, nonce) = client_a.encrypt(uid2, r#"{"type":"key","vk_code":65}"#);
 
     // Tamper with the ciphertext (flip a byte)
     let mut ct_bytes = BASE64.decode(&ciphertext_b64).unwrap();
@@ -528,7 +520,11 @@ async fn e2e_bidirectional_encryption() {
     .await;
     let msg = recv(&mut r2).await;
     let decrypted = client_b
-        .decrypt(uid1, msg["ciphertext"].as_str().unwrap(), msg["nonce"].as_str().unwrap())
+        .decrypt(
+            uid1,
+            msg["ciphertext"].as_str().unwrap(),
+            msg["nonce"].as_str().unwrap(),
+        )
         .unwrap();
     assert!(decrypted.contains("vk_code"));
 
@@ -541,7 +537,11 @@ async fn e2e_bidirectional_encryption() {
     .await;
     let msg = recv(&mut r1).await;
     let decrypted = client_a
-        .decrypt(uid2, msg["ciphertext"].as_str().unwrap(), msg["nonce"].as_str().unwrap())
+        .decrypt(
+            uid2,
+            msg["ciphertext"].as_str().unwrap(),
+            msg["nonce"].as_str().unwrap(),
+        )
         .unwrap();
     assert!(decrypted.contains("speak"));
     assert!(decrypted.contains("hello"));
@@ -591,9 +591,7 @@ async fn e2e_nonces_are_unique_per_message() {
         ciphertexts.push(msg["ciphertext"].as_str().unwrap().to_string());
 
         // Each should decrypt correctly
-        let decrypted = client_b
-            .decrypt(uid1, &ciphertexts[i], &nonces[i])
-            .unwrap();
+        let decrypted = client_b.decrypt(uid1, &ciphertexts[i], &nonces[i]).unwrap();
         let json: serde_json::Value = serde_json::from_str(&decrypted).unwrap();
         assert_eq!(json["vk_code"], 65 + i as u64);
     }
@@ -622,8 +620,7 @@ async fn e2e_nonces_are_unique_per_message() {
 #[tokio::test]
 async fn e2e_fingerprints_match_both_sides() {
     let state = setup_server();
-    let (mut w1, mut r1, uid1, mut w2, mut r2, uid2) =
-        join_two_v3_clients(&state, "e2e_fp").await;
+    let (mut w1, mut r1, uid1, mut w2, mut r2, uid2) = join_two_v3_clients(&state, "e2e_fp").await;
 
     let client_a = E2EClient::new();
     let client_b = E2EClient::new();
@@ -645,10 +642,7 @@ async fn e2e_fingerprints_match_both_sides() {
         fp_a, fp_b,
         "Fingerprints must match on both sides for MITM detection"
     );
-    assert!(
-        !fp_a.is_empty(),
-        "Fingerprint must not be empty"
-    );
+    assert!(!fp_a.is_empty(), "Fingerprint must not be empty");
 }
 
 // ============================================================================
@@ -716,9 +710,8 @@ async fn e2e_replayed_message_decrypts_identically() {
     let (ct, nonce) = client_a.encrypt(uid2, r#"{"type":"send_SAS"}"#);
 
     // Send it twice (replay)
-    let e2e_msg = format!(
-        r#"{{"type":"e2e_data","to":{uid2},"ciphertext":"{ct}","nonce":"{nonce}"}}"#
-    );
+    let e2e_msg =
+        format!(r#"{{"type":"e2e_data","to":{uid2},"ciphertext":"{ct}","nonce":"{nonce}"}}"#);
     send_write(&mut w1, &e2e_msg).await;
     send_write(&mut w1, &e2e_msg).await;
 
@@ -727,17 +720,22 @@ async fn e2e_replayed_message_decrypts_identically() {
     let msg2 = recv(&mut r2).await;
 
     let d1 = client_b
-        .decrypt(uid1, msg1["ciphertext"].as_str().unwrap(), msg1["nonce"].as_str().unwrap())
+        .decrypt(
+            uid1,
+            msg1["ciphertext"].as_str().unwrap(),
+            msg1["nonce"].as_str().unwrap(),
+        )
         .unwrap();
     let d2 = client_b
-        .decrypt(uid1, msg2["ciphertext"].as_str().unwrap(), msg2["nonce"].as_str().unwrap())
+        .decrypt(
+            uid1,
+            msg2["ciphertext"].as_str().unwrap(),
+            msg2["nonce"].as_str().unwrap(),
+        )
         .unwrap();
 
     assert_eq!(d1, d2, "Replayed message decrypts identically");
-    assert!(
-        d1.contains("send_SAS"),
-        "Decrypted content is correct"
-    );
+    assert!(d1.contains("send_SAS"), "Decrypted content is correct");
     // NOTE: Client-side replay detection (nonce tracking) is needed to reject duplicates
 }
 
@@ -848,7 +846,11 @@ async fn e2e_three_clients_pairwise() {
     let msg = recv(&mut r2).await;
     assert_eq!(msg["to"], uid2);
     let d = b_for_a
-        .decrypt(uid1, msg["ciphertext"].as_str().unwrap(), msg["nonce"].as_str().unwrap())
+        .decrypt(
+            uid1,
+            msg["ciphertext"].as_str().unwrap(),
+            msg["nonce"].as_str().unwrap(),
+        )
         .unwrap();
     assert!(d.contains("66"), "B should decrypt vk_code 66");
     // B should NOT receive C's message — targeted forwarding skips non-addressed peers
@@ -857,7 +859,11 @@ async fn e2e_three_clients_pairwise() {
     let msg = recv(&mut r3).await;
     assert_eq!(msg["to"], uid3);
     let d = c_for_a
-        .decrypt(uid1, msg["ciphertext"].as_str().unwrap(), msg["nonce"].as_str().unwrap())
+        .decrypt(
+            uid1,
+            msg["ciphertext"].as_str().unwrap(),
+            msg["nonce"].as_str().unwrap(),
+        )
         .unwrap();
     assert!(d.contains("67"), "C should decrypt vk_code 67");
     // C should NOT receive B's message — targeted forwarding skips non-addressed peers
