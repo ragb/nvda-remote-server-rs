@@ -7,6 +7,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream};
 use tokio::time::timeout;
 
@@ -17,6 +18,13 @@ use tokio::time::timeout;
 
 /// Timeout for receiving a response in tests.
 const RECV_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Hash a channel key with SHA-256, as v3 clients must do per the protocol spec.
+fn hash_channel(key: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(key.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
 
 /// Helper: create server state and spawn a client handler, returning the client-side stream.
 fn setup_server() -> Arc<nvdaremote_server_rs::server::ServerState> {
@@ -747,13 +755,14 @@ async fn motd_sent_when_message_not_empty() {
 async fn e2e_supported_field_in_channel_joined() {
     let state = setup_server();
 
-    // Client 1: v3 (e2e capable)
+    // Client 1: v3 (e2e capable) — channel key hashed per protocol spec
+    let channel_hash = hash_channel("e2e_test");
     let stream1 = connect_client(&state);
     let (mut w1, mut r1) = split_client(stream1);
     send_write(&mut w1, r#"{"type":"protocol_version","version":3}"#).await;
     send_write(
         &mut w1,
-        r#"{"type":"join","channel":"e2e_test","connection_type":"master"}"#,
+        &format!(r#"{{"type":"join","channel":"{channel_hash}","connection_type":"master"}}"#),
     )
     .await;
     let msg = recv(&mut r1).await; // channel_joined
@@ -767,7 +776,7 @@ async fn e2e_supported_field_in_channel_joined() {
     send_write(&mut w2, r#"{"type":"protocol_version","version":3}"#).await;
     send_write(
         &mut w2,
-        r#"{"type":"join","channel":"e2e_test","connection_type":"slave"}"#,
+        &format!(r#"{{"type":"join","channel":"{channel_hash}","connection_type":"slave"}}"#),
     )
     .await;
     let msg = recv(&mut r2).await; // channel_joined
@@ -908,13 +917,14 @@ async fn e2e_data_relayed_opaquely() {
 #[tokio::test]
 async fn e2e_client_left_includes_e2e_supported() {
     let state = setup_server();
+    let channel_hash = hash_channel("e2e_left");
 
     let stream1 = connect_client(&state);
     let (mut w1, mut r1) = split_client(stream1);
     send_write(&mut w1, r#"{"type":"protocol_version","version":3}"#).await;
     send_write(
         &mut w1,
-        r#"{"type":"join","channel":"e2e_left","connection_type":"master"}"#,
+        &format!(r#"{{"type":"join","channel":"{channel_hash}","connection_type":"master"}}"#),
     )
     .await;
     let _ = recv(&mut r1).await;
@@ -926,7 +936,7 @@ async fn e2e_client_left_includes_e2e_supported() {
     send_write(&mut w2, r#"{"type":"protocol_version","version":3}"#).await;
     send_write(
         &mut w2,
-        r#"{"type":"join","channel":"e2e_left","connection_type":"slave"}"#,
+        &format!(r#"{{"type":"join","channel":"{channel_hash}","connection_type":"slave"}}"#),
     )
     .await;
     let _ = recv(&mut r2).await;
@@ -984,4 +994,211 @@ async fn e2e_enabled_server_advertises_true() {
     let msg = recv(&mut reader).await;
     assert_eq!(msg["type"], "channel_joined");
     assert_eq!(msg["e2e_available"], true);
+}
+
+// ============================================================================
+// Tests: `to`-based targeted forwarding
+// ============================================================================
+
+#[tokio::test]
+async fn targeted_message_delivered_only_to_recipient() {
+    let state = setup_server();
+
+    // Three clients in the same channel
+    let s1 = connect_client(&state);
+    let (mut w1, mut r1) = split_client(s1);
+    send_write(&mut w1, r#"{"type":"protocol_version","version":2}"#).await;
+    send_write(
+        &mut w1,
+        r#"{"type":"join","channel":"to_test","connection_type":"master"}"#,
+    )
+    .await;
+    let msg = recv(&mut r1).await;
+    assert_eq!(msg["type"], "channel_joined");
+    let _ = recv(&mut r1).await; // motd
+
+    let s2 = connect_client(&state);
+    let (mut w2, mut r2) = split_client(s2);
+    send_write(&mut w2, r#"{"type":"protocol_version","version":2}"#).await;
+    send_write(
+        &mut w2,
+        r#"{"type":"join","channel":"to_test","connection_type":"slave"}"#,
+    )
+    .await;
+    let msg = recv(&mut r2).await;
+    let uid2 = msg["user_id"].as_u64().unwrap();
+    let _ = recv(&mut r2).await; // motd
+    let _ = recv(&mut r1).await; // client_joined
+
+    let s3 = connect_client(&state);
+    let (mut w3, mut r3) = split_client(s3);
+    send_write(&mut w3, r#"{"type":"protocol_version","version":2}"#).await;
+    send_write(
+        &mut w3,
+        r#"{"type":"join","channel":"to_test","connection_type":"slave"}"#,
+    )
+    .await;
+    let _ = recv(&mut r3).await; // channel_joined
+    let _ = recv(&mut r3).await; // motd
+    let _ = recv(&mut r1).await; // client_joined for 3
+    let _ = recv(&mut r2).await; // client_joined for 3
+
+    // Client 1 sends a targeted message to client 2 only
+    send_write(
+        &mut w1,
+        &format!(r#"{{"type":"e2e_data","to":{uid2},"ciphertext":"abc","nonce":"def"}}"#),
+    )
+    .await;
+
+    // Client 2 should receive it
+    let msg = recv(&mut r2).await;
+    assert_eq!(msg["type"], "e2e_data");
+    assert_eq!(msg["to"], uid2);
+
+    // Client 3 should NOT receive it
+    let result = timeout(Duration::from_millis(200), r3.next_line()).await;
+    assert!(
+        result.is_err(),
+        "Non-targeted client should not receive the message"
+    );
+}
+
+#[tokio::test]
+async fn targeted_message_to_nonexistent_user_is_silently_dropped() {
+    let state = setup_server();
+
+    let s1 = connect_client(&state);
+    let (mut w1, mut r1) = split_client(s1);
+    send_write(&mut w1, r#"{"type":"protocol_version","version":2}"#).await;
+    send_write(
+        &mut w1,
+        r#"{"type":"join","channel":"to_drop","connection_type":"master"}"#,
+    )
+    .await;
+    let _ = recv(&mut r1).await; // channel_joined
+    let _ = recv(&mut r1).await; // motd
+
+    let s2 = connect_client(&state);
+    let (mut w2, mut r2) = split_client(s2);
+    send_write(&mut w2, r#"{"type":"protocol_version","version":2}"#).await;
+    send_write(
+        &mut w2,
+        r#"{"type":"join","channel":"to_drop","connection_type":"slave"}"#,
+    )
+    .await;
+    let _ = recv(&mut r2).await; // channel_joined
+    let _ = recv(&mut r2).await; // motd
+    let _ = recv(&mut r1).await; // client_joined
+
+    // Send to a user ID that doesn't exist (99999)
+    send_write(
+        &mut w1,
+        r#"{"type":"e2e_data","to":99999,"ciphertext":"abc","nonce":"def"}"#,
+    )
+    .await;
+
+    // Neither client should receive it
+    let result = timeout(Duration::from_millis(200), r2.next_line()).await;
+    assert!(
+        result.is_err(),
+        "Message to nonexistent user should be silently dropped"
+    );
+
+    // Connection should still be alive — send a broadcast and verify
+    send_write(&mut w1, r#"{"type":"key","vk_code":65}"#).await;
+    let msg = recv(&mut r2).await;
+    assert_eq!(msg["type"], "key");
+}
+
+#[tokio::test]
+async fn targeted_message_cannot_cross_channels() {
+    let state = setup_server();
+
+    // Client 1 in channel A
+    let s1 = connect_client(&state);
+    let (mut w1, mut r1) = split_client(s1);
+    send_write(&mut w1, r#"{"type":"protocol_version","version":2}"#).await;
+    send_write(
+        &mut w1,
+        r#"{"type":"join","channel":"chan_a","connection_type":"master"}"#,
+    )
+    .await;
+    let _ = recv(&mut r1).await; // channel_joined
+    let _ = recv(&mut r1).await; // motd
+
+    // Client 2 in channel B
+    let s2 = connect_client(&state);
+    let (mut w2, mut r2) = split_client(s2);
+    send_write(&mut w2, r#"{"type":"protocol_version","version":2}"#).await;
+    send_write(
+        &mut w2,
+        r#"{"type":"join","channel":"chan_b","connection_type":"slave"}"#,
+    )
+    .await;
+    let msg = recv(&mut r2).await;
+    let uid2 = msg["user_id"].as_u64().unwrap();
+    let _ = recv(&mut r2).await; // motd
+
+    // Client 1 tries to send a targeted message to client 2 (different channel)
+    send_write(
+        &mut w1,
+        &format!(r#"{{"type":"e2e_data","to":{uid2},"ciphertext":"abc","nonce":"def"}}"#),
+    )
+    .await;
+
+    // Client 2 should NOT receive it — different channel
+    let result = timeout(Duration::from_millis(200), r2.next_line()).await;
+    assert!(
+        result.is_err(),
+        "Targeted message must not cross channel boundaries"
+    );
+}
+
+#[tokio::test]
+async fn message_without_to_still_broadcasts() {
+    let state = setup_server();
+
+    let s1 = connect_client(&state);
+    let (mut w1, mut r1) = split_client(s1);
+    send_write(&mut w1, r#"{"type":"protocol_version","version":2}"#).await;
+    send_write(
+        &mut w1,
+        r#"{"type":"join","channel":"bcast","connection_type":"master"}"#,
+    )
+    .await;
+    let _ = recv(&mut r1).await; // channel_joined
+    let _ = recv(&mut r1).await; // motd
+
+    let s2 = connect_client(&state);
+    let (mut w2, mut r2) = split_client(s2);
+    send_write(&mut w2, r#"{"type":"protocol_version","version":2}"#).await;
+    send_write(
+        &mut w2,
+        r#"{"type":"join","channel":"bcast","connection_type":"slave"}"#,
+    )
+    .await;
+    let _ = recv(&mut r2).await; // channel_joined
+    let _ = recv(&mut r2).await; // motd
+    let _ = recv(&mut r1).await; // client_joined
+
+    let s3 = connect_client(&state);
+    let (mut w3, mut r3) = split_client(s3);
+    send_write(&mut w3, r#"{"type":"protocol_version","version":2}"#).await;
+    send_write(
+        &mut w3,
+        r#"{"type":"join","channel":"bcast","connection_type":"slave"}"#,
+    )
+    .await;
+    let _ = recv(&mut r3).await; // channel_joined
+    let _ = recv(&mut r3).await; // motd
+    let _ = recv(&mut r1).await; // client_joined for 3
+    let _ = recv(&mut r2).await; // client_joined for 3
+
+    // Message without "to" should broadcast to all others
+    send_write(&mut w1, r#"{"type":"key","vk_code":65}"#).await;
+
+    let msg2 = recv(&mut r2).await;
+    assert_eq!(msg2["type"], "key");
+    let msg3 = recv(&mut r3).await;
+    assert_eq!(msg3["type"], "key");
 }

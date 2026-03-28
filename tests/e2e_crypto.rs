@@ -18,7 +18,16 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream};
 use tokio::time::timeout;
 use x25519_dalek::{PublicKey, StaticSecret};
 
+use sha2::Digest;
+
 const RECV_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Hash a channel key with SHA-256, as v3 clients must do per the protocol spec.
+fn hash_channel(key: &str) -> String {
+    let mut hasher = <Sha256 as Digest>::new();
+    Digest::update(&mut hasher, key.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
 
 fn setup_server() -> Arc<nvdaremote_server_rs::server::ServerState> {
     nvdaremote_server_rs::server::ServerState::new(
@@ -76,6 +85,8 @@ struct E2EClient {
     public_key: PublicKey,
     nonce_prefix: [u8; 4],
     user_id: u64,
+    /// The real channel key (plaintext, not hashed) — used as HKDF salt
+    channel_key: String,
     /// Pairwise shared keys indexed by peer user_id
     peer_keys: std::collections::HashMap<u64, Vec<u8>>,
     /// Nonce counter per peer
@@ -83,7 +94,7 @@ struct E2EClient {
 }
 
 impl E2EClient {
-    fn new() -> Self {
+    fn new(channel_key: &str) -> Self {
         use rand::RngExt;
         let mut rng = rand::rng();
         let mut secret_bytes = [0u8; 32];
@@ -97,6 +108,7 @@ impl E2EClient {
             public_key,
             nonce_prefix,
             user_id: 0,
+            channel_key: channel_key.to_string(),
             peer_keys: std::collections::HashMap::new(),
             nonce_counters: std::collections::HashMap::new(),
         }
@@ -127,10 +139,10 @@ impl E2EClient {
         // X25519 DH
         let shared_secret = self.secret.diffie_hellman(&peer_pubkey);
 
-        // HKDF-SHA256 to derive the symmetric key
-        let hkdf = Hkdf::<Sha256>::new(Some(b"nvdaremote-e2e-v1"), shared_secret.as_bytes());
+        // HKDF-SHA256: ikm=DH_shared_secret, salt=channel_key, info="nvda-remote-e2e"
+        let hkdf = Hkdf::<Sha256>::new(Some(self.channel_key.as_bytes()), shared_secret.as_bytes());
         let mut key = vec![0u8; 32];
-        hkdf.expand(b"", &mut key).unwrap();
+        hkdf.expand(b"nvda-remote-e2e", &mut key).unwrap();
 
         self.peer_keys.insert(peer_id, key);
         self.nonce_counters.insert(peer_id, 0);
@@ -169,28 +181,6 @@ impl E2EClient {
         let plaintext = cipher.decrypt(nonce, ciphertext.as_ref()).ok()?;
         Some(String::from_utf8(plaintext).ok()?)
     }
-
-    /// Compute verification fingerprint with a peer (same on both sides)
-    fn fingerprint(&self, _peer_id: u64, peer_pubkey_b64: &str) -> String {
-        use blake2::Digest;
-        let peer_bytes = BASE64.decode(peer_pubkey_b64).unwrap();
-        let my_bytes = self.public_key.as_bytes().to_vec();
-        let mut keys = vec![my_bytes, peer_bytes];
-        keys.sort();
-        let mut hasher = blake2::Blake2b::<blake2::digest::consts::U8>::new();
-        hasher.update(&keys[0]);
-        hasher.update(&keys[1]);
-        let digest = hasher.finalize();
-        hex::encode(digest)
-    }
-}
-
-// We need hex encoding for fingerprints but don't want another dep.
-// Inline a tiny hex encoder.
-mod hex {
-    pub fn encode(bytes: impl AsRef<[u8]>) -> String {
-        bytes.as_ref().iter().map(|b| format!("{b:02x}")).collect()
-    }
 }
 
 /// Helper: join two v3 clients to a channel, consume the setup messages,
@@ -206,12 +196,14 @@ async fn join_two_v3_clients(
     tokio::io::Lines<BufReader<tokio::io::ReadHalf<DuplexStream>>>,
     u64,
 ) {
+    let channel_hash = hash_channel(channel);
+
     let stream1 = connect_client(state);
     let (mut w1, mut r1) = split_client(stream1);
     send_write(&mut w1, r#"{"type":"protocol_version","version":3}"#).await;
     send_write(
         &mut w1,
-        &format!(r#"{{"type":"join","channel":"{channel}","connection_type":"master"}}"#),
+        &format!(r#"{{"type":"join","channel":"{channel_hash}","connection_type":"master"}}"#),
     )
     .await;
     let msg = recv(&mut r1).await; // channel_joined
@@ -222,7 +214,7 @@ async fn join_two_v3_clients(
     send_write(&mut w2, r#"{"type":"protocol_version","version":3}"#).await;
     send_write(
         &mut w2,
-        &format!(r#"{{"type":"join","channel":"{channel}","connection_type":"slave"}}"#),
+        &format!(r#"{{"type":"join","channel":"{channel_hash}","connection_type":"slave"}}"#),
     )
     .await;
     let msg = recv(&mut r2).await; // channel_joined
@@ -243,10 +235,10 @@ async fn e2e_full_flow_encrypt_relay_decrypt() {
     let (mut w1, mut r1, uid1, mut w2, mut r2, uid2) =
         join_two_v3_clients(&state, "e2e_full").await;
 
-    // Create E2E clients
-    let mut client_a = E2EClient::new();
+    // Create E2E clients with channel key for HKDF derivation
+    let mut client_a = E2EClient::new("e2e_full");
     client_a.user_id = uid1;
-    let mut client_b = E2EClient::new();
+    let mut client_b = E2EClient::new("e2e_full");
     client_b.user_id = uid2;
 
     // Exchange public keys through the relay
@@ -301,9 +293,9 @@ async fn e2e_server_cannot_read_encrypted_content() {
     let (mut w1, mut r1, uid1, mut w2, mut r2, uid2) =
         join_two_v3_clients(&state, "e2e_opaque").await;
 
-    let mut client_a = E2EClient::new();
+    let mut client_a = E2EClient::new("e2e_opaque");
     client_a.user_id = uid1;
-    let mut client_b = E2EClient::new();
+    let mut client_b = E2EClient::new("e2e_opaque");
     client_b.user_id = uid2;
 
     // Key exchange
@@ -363,9 +355,9 @@ async fn e2e_wrong_key_cannot_decrypt() {
     let (mut w1, mut r1, uid1, mut w2, mut r2, uid2) =
         join_two_v3_clients(&state, "e2e_wrongkey").await;
 
-    let mut client_a = E2EClient::new();
+    let mut client_a = E2EClient::new("e2e_wrongkey");
     client_a.user_id = uid1;
-    let mut client_b = E2EClient::new();
+    let mut client_b = E2EClient::new("e2e_wrongkey");
     client_b.user_id = uid2;
 
     // Normal key exchange
@@ -384,7 +376,7 @@ async fn e2e_wrong_key_cannot_decrypt() {
     let (ciphertext, nonce) = client_a.encrypt(uid2, r#"{"type":"key","vk_code":65}"#);
 
     // An attacker with a DIFFERENT keypair tries to decrypt
-    let mut attacker = E2EClient::new();
+    let mut attacker = E2EClient::new("e2e_wrongkey");
     // The attacker derives a key with client A's public key but their own secret
     // This produces a DIFFERENT shared secret
     attacker.add_peer(uid1, &client_a.pubkey_b64());
@@ -406,9 +398,9 @@ async fn e2e_tampered_ciphertext_rejected() {
     let (mut w1, mut r1, uid1, mut w2, mut r2, uid2) =
         join_two_v3_clients(&state, "e2e_tamper").await;
 
-    let mut client_a = E2EClient::new();
+    let mut client_a = E2EClient::new("e2e_tamper");
     client_a.user_id = uid1;
-    let mut client_b = E2EClient::new();
+    let mut client_b = E2EClient::new("e2e_tamper");
     client_b.user_id = uid2;
 
     // Key exchange
@@ -451,9 +443,9 @@ async fn e2e_tampered_nonce_rejected() {
     let (mut w1, mut r1, uid1, mut w2, mut r2, uid2) =
         join_two_v3_clients(&state, "e2e_nonce_tamper").await;
 
-    let mut client_a = E2EClient::new();
+    let mut client_a = E2EClient::new("e2e_nonce_tamper");
     client_a.user_id = uid1;
-    let mut client_b = E2EClient::new();
+    let mut client_b = E2EClient::new("e2e_nonce_tamper");
     client_b.user_id = uid2;
 
     send_write(&mut w1, &client_a.pubkey_message()).await;
@@ -494,9 +486,9 @@ async fn e2e_bidirectional_encryption() {
     let (mut w1, mut r1, uid1, mut w2, mut r2, uid2) =
         join_two_v3_clients(&state, "e2e_bidir").await;
 
-    let mut client_a = E2EClient::new();
+    let mut client_a = E2EClient::new("e2e_bidir");
     client_a.user_id = uid1;
-    let mut client_b = E2EClient::new();
+    let mut client_b = E2EClient::new("e2e_bidir");
     client_b.user_id = uid2;
 
     // Key exchange
@@ -557,9 +549,9 @@ async fn e2e_nonces_are_unique_per_message() {
     let (mut w1, mut r1, uid1, mut w2, mut r2, uid2) =
         join_two_v3_clients(&state, "e2e_nonces").await;
 
-    let mut client_a = E2EClient::new();
+    let mut client_a = E2EClient::new("e2e_nonces");
     client_a.user_id = uid1;
-    let mut client_b = E2EClient::new();
+    let mut client_b = E2EClient::new("e2e_nonces");
     client_b.user_id = uid2;
 
     send_write(&mut w1, &client_a.pubkey_message()).await;
@@ -614,63 +606,51 @@ async fn e2e_nonces_are_unique_per_message() {
 }
 
 // ============================================================================
-// TEST: Fingerprints match on both sides (MITM detection)
+// TEST: MITM attack fails due to channel key binding in HKDF
 // ============================================================================
 
 #[tokio::test]
-async fn e2e_fingerprints_match_both_sides() {
-    let state = setup_server();
-    let (mut w1, mut r1, uid1, mut w2, mut r2, uid2) = join_two_v3_clients(&state, "e2e_fp").await;
+async fn e2e_mitm_fails_without_channel_key() {
+    // A MITM attacker (e.g. malicious relay server) intercepts key exchange and
+    // substitutes its own ephemeral keys. The attacker completes separate DH exchanges
+    // with A and B, but does NOT know the real channel key. Since the channel key is
+    // mixed into HKDF as salt, the attacker derives different encryption keys and
+    // cannot decrypt or forge messages.
 
-    let client_a = E2EClient::new();
-    let client_b = E2EClient::new();
+    let channel_key = "secret_room_key";
 
-    // Exchange pubkeys through relay
-    send_write(&mut w1, &client_a.pubkey_message()).await;
-    let msg = recv(&mut r2).await;
-    let pubkey_a_b64 = msg["pubkey"].as_str().unwrap().to_string();
+    // Legitimate clients share the real channel key
+    let mut client_a = E2EClient::new(channel_key);
+    let mut client_b = E2EClient::new(channel_key);
 
-    send_write(&mut w2, &client_b.pubkey_message()).await;
-    let msg = recv(&mut r1).await;
-    let pubkey_b_b64 = msg["pubkey"].as_str().unwrap().to_string();
+    // Attacker does NOT know the real channel key — uses the SHA-256 hash
+    // (which is what the server sees in the join message)
+    let mut attacker_for_a = E2EClient::new(&hash_channel(channel_key));
+    let mut attacker_for_b = E2EClient::new(&hash_channel(channel_key));
 
-    // Both sides compute fingerprint — must match
-    let fp_a = client_a.fingerprint(uid2, &pubkey_b_b64);
-    let fp_b = client_b.fingerprint(uid1, &pubkey_a_b64);
+    // MITM: attacker intercepts A's pubkey and gives A the attacker's key instead of B's
+    attacker_for_a.add_peer(1, &client_a.pubkey_b64());
+    client_a.add_peer(2, &attacker_for_a.pubkey_b64()); // A thinks this is B
 
-    assert_eq!(
-        fp_a, fp_b,
-        "Fingerprints must match on both sides for MITM detection"
+    // MITM: attacker intercepts B's pubkey and gives B the attacker's key instead of A's
+    attacker_for_b.add_peer(2, &client_b.pubkey_b64());
+    client_b.add_peer(1, &attacker_for_b.pubkey_b64()); // B thinks this is A
+
+    // A encrypts a message "for B" (actually using attacker's key)
+    let (ct, nonce) = client_a.encrypt(2, r#"{"type":"key","vk_code":65}"#);
+
+    // Attacker tries to decrypt A's message — fails because channel key doesn't match
+    let result = attacker_for_a.decrypt(1, &ct, &nonce);
+    assert!(
+        result.is_none(),
+        "Attacker without real channel key must not decrypt (HKDF salt mismatch)"
     );
-    assert!(!fp_a.is_empty(), "Fingerprint must not be empty");
-}
 
-// ============================================================================
-// TEST: MITM attack — substituted key produces different fingerprint
-// ============================================================================
-
-#[tokio::test]
-async fn e2e_mitm_detected_by_fingerprint() {
-    // Pure crypto test — no relay needed.
-    // Simulates a MITM server that substitutes its own key during exchange.
-    let client_a = E2EClient::new();
-    let client_b = E2EClient::new();
-    let attacker = E2EClient::new();
-
-    // Normal case: A and B see each other's real keys → same fingerprint
-    let fp_a_normal = client_a.fingerprint(0, &client_b.pubkey_b64());
-    let fp_b_normal = client_b.fingerprint(0, &client_a.pubkey_b64());
-    assert_eq!(fp_a_normal, fp_b_normal, "Without MITM, fingerprints match");
-
-    // MITM case: server substitutes attacker's key for B's key
-    // A thinks they received B's key but actually got attacker's key
-    let fp_a_sees = client_a.fingerprint(0, &attacker.pubkey_b64());
-    // B still has A's real key (or attacker substituted there too — either way different)
-    let fp_b_sees = client_b.fingerprint(0, &client_a.pubkey_b64());
-
-    assert_ne!(
-        fp_a_sees, fp_b_sees,
-        "MITM substitution must produce different fingerprints — users would detect mismatch"
+    // B also can't decrypt — different DH shared secret (B did DH with attacker, not A)
+    let result = client_b.decrypt(1, &ct, &nonce);
+    assert!(
+        result.is_none(),
+        "B cannot decrypt A's message when MITM substituted keys"
     );
 }
 
@@ -690,9 +670,9 @@ async fn e2e_replayed_message_decrypts_identically() {
     let (mut w1, mut r1, uid1, mut w2, mut r2, uid2) =
         join_two_v3_clients(&state, "e2e_replay").await;
 
-    let mut client_a = E2EClient::new();
+    let mut client_a = E2EClient::new("e2e_replay");
     client_a.user_id = uid1;
-    let mut client_b = E2EClient::new();
+    let mut client_b = E2EClient::new("e2e_replay");
     client_b.user_id = uid2;
 
     send_write(&mut w1, &client_a.pubkey_message()).await;
@@ -747,13 +727,15 @@ async fn e2e_replayed_message_decrypts_identically() {
 async fn e2e_three_clients_pairwise() {
     let state = setup_server();
 
-    // Join 3 clients
+    // Join 3 clients (channel key hashed with SHA-256 per protocol spec)
+    let channel_hash = hash_channel("e2e_3way");
+
     let stream1 = connect_client(&state);
     let (mut w1, mut r1) = split_client(stream1);
     send_write(&mut w1, r#"{"type":"protocol_version","version":3}"#).await;
     send_write(
         &mut w1,
-        r#"{"type":"join","channel":"e2e_3way","connection_type":"master"}"#,
+        &format!(r#"{{"type":"join","channel":"{channel_hash}","connection_type":"master"}}"#),
     )
     .await;
     let msg = recv(&mut r1).await;
@@ -764,7 +746,7 @@ async fn e2e_three_clients_pairwise() {
     send_write(&mut w2, r#"{"type":"protocol_version","version":3}"#).await;
     send_write(
         &mut w2,
-        r#"{"type":"join","channel":"e2e_3way","connection_type":"slave"}"#,
+        &format!(r#"{{"type":"join","channel":"{channel_hash}","connection_type":"slave"}}"#),
     )
     .await;
     let msg = recv(&mut r2).await;
@@ -776,7 +758,7 @@ async fn e2e_three_clients_pairwise() {
     send_write(&mut w3, r#"{"type":"protocol_version","version":3}"#).await;
     send_write(
         &mut w3,
-        r#"{"type":"join","channel":"e2e_3way","connection_type":"slave"}"#,
+        &format!(r#"{{"type":"join","channel":"{channel_hash}","connection_type":"slave"}}"#),
     )
     .await;
     let msg = recv(&mut r3).await;
@@ -794,8 +776,8 @@ async fn e2e_three_clients_pairwise() {
     // (In real impl, A would use one keypair and derive separate shared secrets.)
 
     // A↔B key exchange
-    let mut a_for_b = E2EClient::new();
-    let mut b_for_a = E2EClient::new();
+    let mut a_for_b = E2EClient::new("e2e_3way");
+    let mut b_for_a = E2EClient::new("e2e_3way");
     // Exchange through relay
     send_write(&mut w1, &a_for_b.pubkey_message()).await;
     let msg_b = recv(&mut r2).await;
@@ -811,8 +793,8 @@ async fn e2e_three_clients_pairwise() {
     b_for_a.add_peer(uid1, &pk_a_b64);
 
     // A↔C key exchange
-    let mut a_for_c = E2EClient::new();
-    let mut c_for_a = E2EClient::new();
+    let mut a_for_c = E2EClient::new("e2e_3way");
+    let mut c_for_a = E2EClient::new("e2e_3way");
     send_write(&mut w1, &a_for_c.pubkey_message()).await;
     let msg_c = recv(&mut r3).await;
     let _ = recv(&mut r2).await;
