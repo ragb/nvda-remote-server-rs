@@ -2,60 +2,18 @@ mod client;
 mod config;
 mod protocol;
 mod server;
+mod tls;
 
 use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use rcgen::generate_simple_self_signed;
-use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 use tracing::{error, info, instrument, warn};
 
 use crate::config::AppConfig;
 use crate::server::ServerState;
-
-fn load_tls_from_files(
-    cert_path: &str,
-    key_path: &str,
-) -> Result<(CertificateDer<'static>, PrivatePkcs8KeyDer<'static>)> {
-    let cert_pem = std::fs::read(cert_path)
-        .with_context(|| format!("Failed to read cert file: {cert_path}"))?;
-    let key_pem =
-        std::fs::read(key_path).with_context(|| format!("Failed to read key file: {key_path}"))?;
-
-    let cert = rustls_pemfile::certs(&mut &cert_pem[..])
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("No certificate found in {cert_path}"))??;
-    let key = rustls_pemfile::pkcs8_private_keys(&mut &key_pem[..])
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("No PKCS8 private key found in {key_path}"))??;
-
-    Ok((cert, key))
-}
-
-fn generate_and_save_tls(
-    cert_path: &str,
-    key_path: &str,
-) -> Result<(CertificateDer<'static>, PrivatePkcs8KeyDer<'static>)> {
-    let cert = generate_simple_self_signed(vec!["localhost".to_string()])
-        .context("Failed to generate self-signed certificate")?;
-
-    let cert_pem = cert.cert.pem();
-    let key_pem = cert.signing_key.serialize_pem();
-
-    std::fs::write(cert_path, &cert_pem)
-        .with_context(|| format!("Failed to write cert file: {cert_path}"))?;
-    std::fs::write(key_path, &key_pem)
-        .with_context(|| format!("Failed to write key file: {key_path}"))?;
-
-    info!("Self-signed TLS certificate generated and saved");
-
-    let cert_der = CertificateDer::from(cert.cert);
-    let key_der = PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der());
-    Ok((cert_der, key_der))
-}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -72,16 +30,16 @@ async fn main() -> Result<()> {
     let cert_path = config.tls.cert_path.as_deref().unwrap_or("cert.pem");
     let key_path = config.tls.key_path.as_deref().unwrap_or("key.pem");
 
-    let (cert_der, key_der) = if Path::new(cert_path).exists() && Path::new(key_path).exists() {
+    let (cert_chain, key_der) = if Path::new(cert_path).exists() && Path::new(key_path).exists() {
         info!("Loading TLS certificate from disk");
-        load_tls_from_files(cert_path, key_path)?
+        tls::load_from_files(cert_path, key_path)?
     } else {
-        generate_and_save_tls(cert_path, key_path)?
+        tls::generate_and_save(cert_path, key_path)?
     };
 
     let tls_config = rustls::ServerConfig::builder()
         .with_no_client_auth()
-        .with_single_cert(vec![cert_der], key_der.into())
+        .with_single_cert(cert_chain, key_der.into())
         .context("Failed to build TLS config")?;
 
     let acceptor = TlsAcceptor::from(Arc::new(tls_config));
