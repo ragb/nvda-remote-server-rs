@@ -3,10 +3,17 @@ name = "nvdaremote-server-rs"
 version = "0.0.2"
 edition = "2024"
 
+[features]
+default = []
+prometheus = ["dep:axum", "dep:metrics-exporter-prometheus"]
+admin = ["dep:axum", "dep:metrics-exporter-prometheus"]
+
 [dependencies]
 anyhow = "1.0"
 config = "0.15"
 dashmap = "6"
+metrics = "0.24"
+tokio-metrics = { version = "0.4", features = ["rt", "metrics-rs-integration"] }
 rand = "0.10"
 rcgen = "0.14"
 rustls = "0.23"
@@ -18,6 +25,10 @@ tokio = { version = "1", features = ["full"] }
 tokio-rustls = "0.26"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Prometheus export and admin dashboard (feature-gated)
+axum = { version = "0.8", optional = true, default-features = false, features = ["http1", "tokio"] }
+metrics-exporter-prometheus = { version = "0.18", optional = true, default-features = false }
 
 [dev-dependencies]
 x25519-dalek = { version = "2", features = ["static_secrets"] }

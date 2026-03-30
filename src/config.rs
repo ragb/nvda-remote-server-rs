@@ -9,6 +9,8 @@ pub struct AppConfig {
     pub e2e: E2eConfig,
     #[serde(default)]
     pub tls: TlsConfig,
+    #[serde(default)]
+    pub metrics: MetricsConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -39,6 +41,35 @@ impl Default for E2eConfig {
 pub struct TlsConfig {
     pub cert_path: Option<String>,
     pub key_path: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct MetricsConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "MetricsConfig::default_bind")]
+    pub bind: String,
+    #[serde(default = "MetricsConfig::default_port")]
+    pub port: u16,
+}
+
+impl Default for MetricsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bind: Self::default_bind(),
+            port: Self::default_port(),
+        }
+    }
+}
+
+impl MetricsConfig {
+    fn default_bind() -> String {
+        "127.0.0.1".to_string()
+    }
+    fn default_port() -> u16 {
+        9090
+    }
 }
 
 impl AppConfig {

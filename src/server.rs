@@ -173,6 +173,27 @@ impl ServerState {
     }
 }
 
+/// Stats for the admin dashboard and metrics endpoints.
+impl ServerState {
+    /// Total number of connected clients across all channels.
+    pub fn connection_count(&self) -> usize {
+        self.channels.iter().map(|c| c.members.len()).sum()
+    }
+
+    /// Number of active channels.
+    pub fn channel_count(&self) -> usize {
+        self.channels.len()
+    }
+
+    /// Per-channel details: (channel_name, member_count).
+    pub fn channel_details(&self) -> Vec<(String, usize)> {
+        self.channels
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().members.len()))
+            .collect()
+    }
+}
+
 /// Strip protocol v2 fields (origin, client, clients) from a JSON message
 /// for backwards compatibility with v1 clients.
 pub(crate) fn strip_v2_fields(message: &str) -> String {

@@ -1,5 +1,6 @@
 mod client;
 mod config;
+mod observability;
 mod protocol;
 mod server;
 mod tls;
@@ -44,6 +45,26 @@ async fn main() -> Result<()> {
 
     let acceptor = TlsAcceptor::from(Arc::new(tls_config));
     let state = ServerState::new(config.motd, config.e2e.allow);
+
+    #[cfg(any(feature = "prometheus", feature = "admin"))]
+    if config.metrics.enabled {
+        // Install the Prometheus recorder first so tokio-metrics can capture handles
+        let prom_handle = observability::init();
+
+        // Spawn tokio runtime metrics collector (must be after recorder install)
+        tokio::spawn(
+            tokio_metrics::RuntimeMetricsReporterBuilder::default()
+                .describe()
+                .build()
+                .run(),
+        );
+
+        let metrics_state = state.clone();
+        let metrics_config = config.metrics.clone();
+        tokio::spawn(async move {
+            observability::http::serve(&metrics_config, prom_handle, metrics_state).await;
+        });
+    }
 
     let mut listeners = Vec::new();
 
@@ -108,6 +129,8 @@ async fn accept_loop(listener: TcpListener, acceptor: TlsAcceptor, state: Arc<Se
                 Ok(stream) => stream,
                 Err(e) => {
                     warn!(peer = %peer_addr, "TLS handshake failed: {e}");
+                    metrics::counter!(crate::observability::metrics::TLS_HANDSHAKE_FAILURES_TOTAL)
+                        .increment(1);
                     return;
                 }
             };
