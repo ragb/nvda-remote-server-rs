@@ -6,6 +6,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, instrument, warn};
 
+use crate::observability::metrics as m;
 use crate::protocol::{ClientInfo, ClientMessage, ConnectionType, ServerMessage};
 use crate::server::{ChannelMember, ServerState};
 
@@ -46,6 +47,7 @@ impl ClientSession {
         let key = self.state.generate_key();
         info!(key = %key, "Generated key");
         self.send(&ServerMessage::GenerateKey { key });
+        metrics::counter!(m::KEYS_GENERATED_TOTAL).increment(1);
     }
 
     fn handle_join(&mut self, channel: String, connection_type: Option<ConnectionType>) {
@@ -55,6 +57,7 @@ impl ClientSession {
             self.send(&ServerMessage::Error {
                 error: "invalid_parameters".to_string(),
             });
+            metrics::counter!(m::JOIN_FAILURES_TOTAL).increment(1);
             return;
         }
 
@@ -115,11 +118,14 @@ impl ClientSession {
             if let Some(target_id) = extract_to_field(raw_message) {
                 debug!(channel = %channel, target = target_id, "Targeted relay");
                 self.state.send_to_client(channel, target_id, &forwarded);
+                metrics::counter!(m::TARGETED_MESSAGES_TOTAL).increment(1);
             } else {
                 debug!(channel = %channel, "Relaying message");
                 self.state
                     .broadcast_to_channel(channel, self.id, &forwarded);
             }
+            metrics::counter!(m::MESSAGES_RELAYED_TOTAL).increment(1);
+            metrics::counter!(m::BYTES_RELAYED_TOTAL).increment(forwarded.len() as u64);
         }
     }
 
@@ -156,6 +162,8 @@ where
     tracing::Span::current().record("client_id", client_id);
 
     info!("Connected");
+    metrics::counter!(m::CONNECTIONS_TOTAL).increment(1);
+    metrics::gauge!(m::ACTIVE_CONNECTIONS).increment(1.0);
 
     let (reader, writer) = tokio::io::split(stream);
     let mut lines = BufReader::new(reader).lines();
@@ -173,6 +181,8 @@ where
     let _ = write_handle.await;
 
     info!("Disconnected");
+    metrics::counter!(m::DISCONNECTIONS_TOTAL).increment(1);
+    metrics::gauge!(m::ACTIVE_CONNECTIONS).decrement(1.0);
 }
 
 async fn read_loop<R: tokio::io::AsyncRead + Unpin>(

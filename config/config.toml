@@ -16,3 +16,9 @@ allow = true
 [tls]
 # cert_path = "cert.pem"
 # key_path = "key.pem"
+
+# [metrics]
+# Enable the metrics/admin HTTP server (requires --features metrics or --features admin).
+# enabled = true
+# bind = "127.0.0.1"
+# port = 9090

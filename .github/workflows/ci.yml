@@ -16,7 +16,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test
+      - run: cargo test --features prometheus,admin
 
   clippy:
     runs-on: ubuntu-latest
@@ -26,7 +26,7 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy -- -D warnings
+      - run: cargo clippy --features prometheus,admin -- -D warnings
 
   fmt:
     runs-on: ubuntu-latest

@@ -20,13 +20,21 @@ The NVDA Remote relay server connects NVDA screen reader users over the internet
 - Dual-stack IPv4/IPv6 binding
 - Protocol v2 `origin` field injection and v1 backwards-compatible field stripping
 - Periodic ping keep-alive (120s)
+- `to`-based targeted forwarding for per-peer encrypted messages
 - Structured logging via `tracing` (env-filter configurable)
+- Metrics instrumentation via `metrics` crate (always-on, zero-cost when no recorder)
+- Optional Prometheus metrics endpoint (`--features prometheus`)
+- Optional admin dashboard with live stats (`--features admin`)
+- Tokio runtime metrics via `tokio-metrics`
 - Concurrent channel state via `DashMap`
 
 ## Building
 
 ```sh
-cargo build --release
+cargo build --release                           # core server only
+cargo build --release --features prometheus      # + Prometheus /metrics endpoint
+cargo build --release --features admin           # + HTML admin dashboard
+cargo build --release --features prometheus,admin  # both
 ```
 
 ## Running
@@ -61,6 +69,25 @@ port = 6837
 - `network.bind_ipv4` - IPv4 address to bind (remove to disable)
 - `network.bind_ipv6` - IPv6 address to bind (remove to disable)
 - `network.port` - TCP port (default: 6837)
+
+### Metrics and Admin Dashboard
+
+When built with `--features prometheus` and/or `--features admin`, the server can expose a metrics/admin HTTP endpoint on a separate port:
+
+```toml
+[metrics]
+enabled = true
+bind = "127.0.0.1"
+port = 9090
+```
+
+- `GET /metrics` — Prometheus text format (requires `prometheus` feature)
+- `GET /` — HTML dashboard with live stats, auto-refreshes every 5s (requires `admin` feature)
+- `GET /stats` — JSON stats endpoint (requires `admin` feature)
+
+Tracked metrics include `active_connections`, `active_channels`, `connections_total`, `messages_relayed_total`, `bytes_relayed_total`, `targeted_messages_total`, `tls_handshake_failures_total`, plus Tokio runtime metrics (`tokio_workers_count`, `tokio_busy_ratio`, `tokio_live_tasks_count`, etc.).
+
+Use `rate(bytes_relayed_total[1m])` in Prometheus for throughput (bytes/sec).
 
 ### Logging
 
@@ -126,8 +153,10 @@ Or build locally:
 
 ```sh
 docker build -t nvdaremote-server .
-docker run -p 6837:6837 nvdaremote-server
+docker run -p 6837:6837 -p 9090:9090 -e NVDAREMOTE__METRICS__ENABLED=true nvdaremote-server
 ```
+
+The Docker image is built with `--features prometheus,admin` so both endpoints are available. Expose port 9090 and set `NVDAREMOTE__METRICS__ENABLED=true` to enable them.
 
 Configuration can be overridden with environment variables using the `NVDAREMOTE` prefix and `__` separator:
 
@@ -174,7 +203,7 @@ The Rust server handles 5,000+ concurrent session pairs. The other servers strug
 cargo test
 ```
 
-70 tests: 34 unit tests (protocol serialization, server state, message transforms), 25 integration tests simulating real NVDA client flows, and 11 E2E crypto tests (key exchange, encrypted relay, attack scenarios).
+81 tests: 42 unit tests (protocol, server state, TLS chain loading, message transforms), 29 integration tests simulating real NVDA client flows (including `to`-based routing), and 10 E2E crypto tests (key exchange, encrypted relay, MITM resistance, attack scenarios).
 
 ## License
 
