@@ -1,4 +1,4 @@
-/// Metric name constants.
+// Metric name constants.
 
 // Gauges
 pub const ACTIVE_CONNECTIONS: &str = "active_connections";
