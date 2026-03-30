@@ -18,5 +18,5 @@ COPY --from=builder /app/target/release/nvdaremote-server-rs /usr/local/bin/
 COPY config /etc/nvdaremote-server-rs/config
 WORKDIR /etc/nvdaremote-server-rs
 ENV NVDAREMOTE__NETWORK__BIND_IPV4=0.0.0.0
-EXPOSE 6837 9090
+EXPOSE 6837
 CMD ["nvdaremote-server-rs"]
