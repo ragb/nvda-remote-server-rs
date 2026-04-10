@@ -215,6 +215,44 @@ e2e_data(to=2,ct,n) ─────→ targeted relay ────────�
 decrypt → {"type":"speak",...}                               encrypt(speak, sequence=[...])
 ```
 
+## Post-quantum cryptography considerations
+
+### Vulnerability summary
+
+| Component | Algorithm | PQ-safe? | Notes |
+|-----------|-----------|----------|-------|
+| Key exchange | X25519 | No | Broken by Shor's algorithm |
+| Key derivation | HKDF-SHA256 | Yes | 128-bit effective PQ security |
+| Symmetric encryption | XSalsa20-Poly1305 | Yes | 128-bit effective PQ security (Grover) |
+| Channel key hash | SHA-256 | Yes | But low-entropy keys (~30 bits) are classically brutable regardless |
+
+The only PQ-vulnerable component is the X25519 key exchange. An attacker performing "harvest now, decrypt later" could record `e2e_pubkey` messages and `e2e_data` ciphertext today, then recover X25519 shared secrets with a future quantum computer. Combined with brute-forcing a low-entropy channel key from its SHA-256 hash, they could derive the HKDF keys and decrypt stored sessions.
+
+### Practical risk for NVDA Remote
+
+The risk is low. The encrypted content is ephemeral screen reader data (keystrokes, speech, braille) — not long-term secrets. An attacker who stores relay traffic for 10+ years to eventually decrypt a screen reader session has a theoretical rather than practical threat model. Sessions are short-lived and keys are discarded on disconnect.
+
+### Upgrade path
+
+The protocol is already PQC-ready. The server relays `e2e_pubkey` and `e2e_data` opaquely — it does not parse pubkey format, length, or content. A client upgrade to hybrid key exchange requires **no server changes and no protocol version bump**.
+
+The recommended approach is hybrid X25519 + ML-KEM (FIPS 203, formerly Kyber):
+
+1. Client generates both an X25519 keypair and an ML-KEM keypair.
+2. Client sends both public keys in the existing `e2e_pubkey` message (the `pubkey` field grows from ~44 to ~1620 bytes base64, which the server relays unchanged).
+3. On receiving a peer's pubkey, the client performs both X25519 DH and ML-KEM decapsulation, concatenates both shared secrets, and feeds them into HKDF: `HKDF-SHA256(ikm=X25519_secret || KEM_secret, salt=channel_key, info="nvda-remote-e2e")`.
+4. Symmetric encryption (XSalsa20-Poly1305) and nonce construction stay unchanged.
+
+This gives classical security from X25519 and post-quantum security from ML-KEM. If either algorithm is broken, the other still protects the session.
+
+### Wire impact
+
+The `e2e_pubkey` message grows from ~90 bytes to ~1.6 KB (ML-KEM-768 public keys are 1184 bytes). For 2-4 clients exchanging keys once per session, this is negligible. Data-plane messages (`e2e_data`) stay the same size since the symmetric cipher is unchanged.
+
+### Dependency status
+
+ML-KEM is not yet available in PyNaCl (which wraps libsodium). The Python client would need `pqcrypto` or `liboqs-python`. This is a client-side concern — the server needs zero changes.
+
 ## Server configuration
 
 E2E availability is controlled by `[e2e] allow` in `config/config.toml`:
