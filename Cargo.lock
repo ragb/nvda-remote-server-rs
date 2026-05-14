@@ -1118,7 +1118,7 @@ dependencies = [
 
 [[package]]
 name = "nvdaremote-server-rs"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "anyhow",
  "axum",
