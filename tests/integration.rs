@@ -1202,3 +1202,48 @@ async fn message_without_to_still_broadcasts() {
     let msg3 = recv(&mut r3).await;
     assert_eq!(msg3["type"], "key");
 }
+
+/// Regression test for issue #6: handle_client must complete after client disconnect.
+/// Before the fix, session.tx kept the writer's rx alive, so write_handle.await hung forever.
+#[tokio::test]
+async fn handle_client_task_completes_after_disconnect() {
+    let state = setup_server();
+
+    // Inline connect_client to capture the JoinHandle
+    let (server_stream, client_stream) = tokio::io::duplex(8192);
+    let handler_state = state.clone();
+    let handle = tokio::spawn(async move {
+        nvdaremote_server_rs::client::handle_client(server_stream, handler_state).await;
+    });
+
+    let (mut writer, mut reader) = split_client(client_stream);
+
+    // Join a channel
+    send_write(&mut writer, r#"{"type":"protocol_version","version":2}"#).await;
+    send_write(
+        &mut writer,
+        r#"{"type":"join","channel":"cleanup_test","connection_type":"master"}"#,
+    )
+    .await;
+    let _ = recv(&mut reader).await; // channel_joined
+    let _ = recv(&mut reader).await; // motd
+
+    assert!(state.channels.contains_key("cleanup_test"));
+
+    // Simulate client disconnect by dropping both halves
+    drop(writer);
+    drop(reader);
+
+    // handle_client must exit within 2 seconds — if it hangs, the bug is present
+    let result = timeout(Duration::from_secs(2), handle).await;
+    assert!(
+        result.is_ok(),
+        "handle_client task did not complete after client disconnect (writer stuck in rx.recv())"
+    );
+
+    // Channel should be cleaned up
+    assert!(
+        !state.channels.contains_key("cleanup_test"),
+        "Channel should be destroyed after last client leaves"
+    );
+}

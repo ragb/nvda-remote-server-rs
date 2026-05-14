@@ -178,7 +178,8 @@ where
     session.disconnect();
     ping_handle.abort();
     drop(tx);
-    let _ = write_handle.await;
+    drop(session); // Drop session.tx so the writer's rx.recv() returns None
+    let _ = tokio::time::timeout(Duration::from_secs(5), write_handle).await;
 
     info!("Disconnected");
     metrics::counter!(m::DISCONNECTIONS_TOTAL).increment(1);
