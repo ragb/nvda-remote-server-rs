@@ -113,6 +113,7 @@ async fn accept_loop(listener: TcpListener, acceptor: TlsAcceptor, state: Arc<Se
             Ok(conn) => conn,
             Err(e) => {
                 error!("Failed to accept TCP connection: {e}");
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 continue;
             }
         };
