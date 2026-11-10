@@ -44,7 +44,7 @@ async fn main() -> Result<()> {
         .context("Failed to build TLS config")?;
 
     let acceptor = TlsAcceptor::from(Arc::new(tls_config));
-    let state = ServerState::new(config.motd, config.e2e.allow);
+    let state = ServerState::new(config.motd);
 
     #[cfg(any(feature = "prometheus", feature = "admin"))]
     if config.metrics.enabled {

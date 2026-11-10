@@ -118,21 +118,15 @@ The server does not parse relayed message content -- it forwards key events, spe
 
 > **Status**: Protocol v3 is a proposed extension. The server side is implemented and ready, but the NVDA client side has not been implemented yet and no PR has been submitted to NVDA. This is a design proposal — the protocol may change based on feedback from the NVDA community.
 
-Protocol v3 adds end-to-end encryption (E2E) support so the relay server cannot read user data. Clients that send `protocol_version: 3` are marked as `e2e_supported: true` in their `ClientInfo`. The server:
+Protocol v3 adds end-to-end encryption (E2E) so the relay server cannot read or tamper with user data. Whether E2E is used is decided by clients alone: a client that joins with the SHA-256 hash of the channel key must use E2E and never falls back to plaintext. The server sends no E2E capability flags, so it cannot trigger a downgrade.
 
-- Exposes `e2e_supported` per client in `channel_joined`, `client_joined`, `client_left`
-- Includes `e2e_available` in `channel_joined` (configurable via `[e2e] allow` in config)
-- Includes `user_id` in `channel_joined` (client's own assigned ID)
+The server treats v3 clients exactly like v2. It:
+
+- Includes `origin` (the client's own id) in `channel_joined` for v2+ clients, as the reference Python relay does
 - Relays `e2e_pubkey` and `e2e_data` messages opaquely (no crypto on the server)
+- Optionally forwards messages with a `to` field only to that peer (a bandwidth optimization; clients also filter by `to`, so broadcasting relays work too)
 
-E2E is all-or-nothing: if any peer in the channel doesn't support E2E, the entire channel operates in plaintext. The server does zero cryptographic work — it only reports peer capabilities. All encryption uses X25519 key exchange and XChaCha20-Poly1305, implemented client-side.
-
-Configuration:
-
-```toml
-[e2e]
-allow = true  # Set to false to disable E2E (e2e_available will be false in channel_joined)
-```
+The server does zero cryptographic work. All encryption (X25519 key exchange, HKDF bound to the channel key, XSalsa20-Poly1305) is implemented client-side, and E2E works through any relay that forwards unknown message types.
 
 See [docs/e2e-encryption.md](docs/e2e-encryption.md) for the full protocol specification, security properties, and Signal protocol comparison.
 
