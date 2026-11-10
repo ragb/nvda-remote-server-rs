@@ -23,7 +23,11 @@ const RECV_TIMEOUT: Duration = Duration::from_secs(2);
 fn hash_channel(key: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(key.as_bytes());
-    format!("{:x}", hasher.finalize())
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// Helper: create server state and spawn a client handler, returning the client-side stream.
