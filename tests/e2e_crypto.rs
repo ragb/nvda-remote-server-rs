@@ -26,7 +26,11 @@ const RECV_TIMEOUT: Duration = Duration::from_secs(2);
 fn hash_channel(key: &str) -> String {
     let mut hasher = <Sha256 as Digest>::new();
     Digest::update(&mut hasher, key.as_bytes());
-    format!("{:x}", hasher.finalize())
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 fn setup_server() -> Arc<nvdaremote_server_rs::server::ServerState> {
@@ -164,9 +168,9 @@ impl E2EClient {
         let key = self.peer_keys.get(&peer_id).expect("No key for peer");
         let cipher = XChaCha20Poly1305::new_from_slice(key).unwrap();
         let nonce_bytes = self.make_nonce(peer_id);
-        let nonce = XNonce::from_slice(&nonce_bytes);
+        let nonce = XNonce::try_from(&nonce_bytes[..]).expect("Invalid nonce length");
         let ciphertext = cipher
-            .encrypt(nonce, plaintext_json.as_bytes())
+            .encrypt(&nonce, plaintext_json.as_bytes())
             .expect("Encryption failed");
         (BASE64.encode(&ciphertext), BASE64.encode(nonce_bytes))
     }
@@ -177,8 +181,8 @@ impl E2EClient {
         let cipher = XChaCha20Poly1305::new_from_slice(key).unwrap();
         let ciphertext = BASE64.decode(ciphertext_b64).ok()?;
         let nonce_bytes = BASE64.decode(nonce_b64).ok()?;
-        let nonce = XNonce::from_slice(&nonce_bytes);
-        let plaintext = cipher.decrypt(nonce, ciphertext.as_ref()).ok()?;
+        let nonce = XNonce::try_from(&nonce_bytes[..]).ok()?;
+        let plaintext = cipher.decrypt(&nonce, ciphertext.as_ref()).ok()?;
         Some(String::from_utf8(plaintext).ok()?)
     }
 }
