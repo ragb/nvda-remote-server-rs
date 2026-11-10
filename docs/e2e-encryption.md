@@ -7,48 +7,51 @@ For the full design rationale, threat model, and client implementation details, 
 ## Protocol versions
 
 - **v1**: bare protocol — line-delimited JSON messages
-- **v2**: adds `origin` (sender's `user_id`), `client`, `clients` fields to relayed messages. Server strips these for v1 clients.
-- **v3**: adds E2E encryption support. `e2e_supported: true` in `ClientInfo`. Extensible for future capabilities without another version bump.
+- **v2**: adds `origin` (sender's id), `client`, `clients` fields to relayed messages, and `origin` (the client's own id) in `channel_joined`. Server strips these for v1 clients.
+- **v3**: marker for E2E-capable clients. The server treats v3 exactly like v2 — there are no v3-specific server fields. E2E works through any v2+ relay that forwards unknown message types.
 
 ## Scope
 
-E2E applies **only to relay server connections**. Direct connections (point-to-point TLS) do not need E2E — the server sets `e2e_available: false` to signal this.
+E2E applies to **all connections**: through a relay server and through NVDA's built-in server (which relays between its clients like any relay).
+
+## Design principle: the server sends no E2E signals
+
+Whether E2E is used is decided by the client alone, never by the server:
+
+- A client that joins with the **hashed** channel key (E2E enabled) must use E2E. It never sends data-plane messages in plaintext; data to a peer is held back until the key exchange with that peer has completed.
+- A client that joins with the **raw** channel key (user disabled E2E) does not use E2E, and the user is warned.
+
+There are no server capability flags (`e2e_available`, `e2e_supported`). Such flags would let a malicious server trigger a downgrade to plaintext by lying about itself or about a peer. A server can still drop or block messages (denial of service), but it cannot cause a downgrade.
 
 ## Server protocol support
 
-### `e2e_supported` derived from protocol version
-
-The server derives `e2e_supported = protocol_version >= 3` for each client. No extra fields in `join` — the version number is sufficient.
-
 ### Channel key hashing
 
-V3 clients with E2E enabled hash the channel key with SHA-256 before sending it in the `join` message:
+Clients with E2E enabled hash the channel key with SHA-256 before sending it in the `join` message:
 
 ```text
 channel = SHA-256(channel_key).hex()
 ```
 
-The server uses the hash to group clients into channels but never learns the real channel key. This is critical for E2E security — the channel key is used as HKDF salt during key derivation, so the server cannot derive encryption keys even if it substitutes ephemeral public keys.
+The server uses the hash as an opaque routing label and never learns the real channel key. This is critical for E2E security — the channel key is used as HKDF salt during key derivation, so the server cannot derive encryption keys even if it substitutes ephemeral public keys.
 
-**Note:** Because the hash differs from the raw key, E2E clients and non-E2E clients joining with the same key end up in separate channels. This is intentional — mixed plaintext/E2E channels would defeat the purpose.
+Because the hash differs from the raw key, E2E clients and non-E2E clients joining with the same key end up in separate channels. Every member of a hashed channel is therefore an E2E client, which is why no per-peer capability flag is needed.
 
 ### `channel_joined` response
 
 ```json
 {
   "type": "channel_joined",
-  "channel": "a]f2d8...",
-  "user_id": 5,
+  "channel": "af2d8...",
+  "origin": 5,
   "user_ids": [1, 2],
-  "clients": [{"id": 1, "connection_type": "master", "e2e_supported": true}],
-  "e2e_available": true
+  "clients": [{"id": 1, "connection_type": "master"}, {"id": 2, "connection_type": "slave"}]
 }
 ```
 
-- **`user_id`**: The client's own assigned ID — needed to filter `e2e_data` messages via the `to` field.
+- **`origin`**: The client's own assigned id (v2+ clients only), matching the reference Python relay (nvaccess/remote-server). Clients use it to recognise `e2e_data` messages addressed to them via `to`.
 - **`user_ids`**: IDs of existing channel members.
-- **`clients`**: Detailed info for each existing member, including `e2e_supported`.
-- **`e2e_available`**: Server-level flag (configurable via `[e2e] allow` in `config.toml`, env: `NVDAREMOTE__E2E__ALLOW`). When `false`, clients must not initiate E2E.
+- **`clients`**: Info for each existing member.
 
 ### `client_joined` / `client_left` notifications
 
@@ -56,7 +59,7 @@ The server uses the hash to group clients into channels but never learns the rea
 {
   "type": "client_joined",
   "user_id": 5,
-  "client": {"id": 5, "connection_type": "slave", "e2e_supported": true}
+  "client": {"id": 5, "connection_type": "slave"}
 }
 ```
 
@@ -64,7 +67,7 @@ The server uses the hash to group clients into channels but never learns the rea
 {
   "type": "client_left",
   "user_id": 5,
-  "client": {"id": 5, "connection_type": "slave", "e2e_supported": true}
+  "client": {"id": 5, "connection_type": "slave"}
 }
 ```
 
@@ -74,7 +77,7 @@ The server does not parse `e2e_pubkey` or `e2e_data` — they are unknown types 
 
 #### `e2e_pubkey`
 
-Broadcast by each client after joining to exchange ephemeral public keys:
+Broadcast by each client after joining, and again whenever a new peer joins, to exchange ephemeral public keys:
 
 ```json
 {"type": "e2e_pubkey", "pubkey": "<base64 X25519 public key>", "nonce_prefix": "<base64 4 bytes>"}
@@ -90,22 +93,13 @@ Encrypted data-plane message addressed to a specific peer:
 {"type": "e2e_data", "to": 2, "ciphertext": "<base64>", "nonce": "<base64 24 bytes>"}
 ```
 
-The server relays this with `origin` added, using targeted forwarding (see below).
+The server relays this with `origin` added.
 
-### `to`-based targeted forwarding
+### `to`-based targeted forwarding (optional)
 
-When any relayed message includes a `to` field, the server forwards it only to the peer with that `user_id` instead of broadcasting. If `to` is absent, the server broadcasts as usual (v2 behavior). If no client with the target ID exists in the channel, the message is silently dropped.
+When a relayed message includes a `to` field, this server forwards it only to the peer with that id instead of broadcasting. If `to` is absent, the server broadcasts as usual. If no client with the target id exists in the channel, the message is silently dropped.
 
-This avoids sending useless ciphertext to peers who cannot decrypt it.
-
-### All-or-nothing E2E
-
-E2E does not support mixed channels. Two conditions must be met:
-
-1. **`e2e_available: true`** in `channel_joined` — server allows E2E.
-2. **All peers `e2e_supported: true`** — checked from `clients` in `channel_joined` and subsequent `client_joined` notifications.
-
-If any peer is v2/v1, E2E is not possible. This is a client-side policy decision — the server reports capabilities but does not enforce E2E.
+This is a bandwidth optimization only. Clients filter incoming `e2e_data` by `to` themselves, so relays that broadcast everything (such as the reference Python relay) remain fully correct.
 
 ## Cryptographic design
 
@@ -134,12 +128,12 @@ Each client generates a random 4-byte `nonce_prefix` per session (broadcast in `
 3. On receiving a peer's `e2e_pubkey` (via relay with `origin`):
    - Compute X25519 DH shared secret.
    - Derive encryption key: `HKDF-SHA256(ikm=DH_shared, salt=channel_key_bytes, info=b"nvda-remote-e2e")`.
-   - Store pairwise key indexed by peer's `user_id`.
+   - Store pairwise key indexed by peer's id (`origin`).
 
 ### Data-plane encryption
 
 - Encrypt the original JSON message (with `type` field) as plaintext.
-- Produce one `e2e_data` message per peer, each with `to` set to the recipient's `user_id`.
+- Produce one `e2e_data` message per peer, each with `to` set to the recipient's id.
 - The `ciphertext` and `nonce` are base64-encoded.
 
 ### Data-plane decryption
@@ -181,7 +175,7 @@ The relay server adds `origin` to all relayed messages. This is **untrusted meta
 - The outer `origin` on `e2e_data` is used only for pairwise key lookup.
 - If the server lies about `origin`, the receiver uses the wrong pairwise key and AEAD decryption fails.
 
-**Recommendation**: Include `_from` (sender's `user_id`) inside the encrypted payload as defense-in-depth. The receiver checks `_from == origin` after decryption.
+**Recommendation**: Include `_from` (sender's id) inside the encrypted payload as defense-in-depth. The receiver checks `_from == origin` after decryption.
 
 ### Not protected
 
@@ -196,10 +190,10 @@ Client A (master, v3)              Server (relay)             Client B (slave, v
 ─────────────────────              ──────────────             ────────────────────
 protocol_version(3) ──────→
 join(SHA256("room"),"master") ─→
-                     ←────── channel_joined(e2e_available=true, peers=[])
+                     ←────── channel_joined(origin=1, peers=[])
                                                              protocol_version(3) ──────→
                                                              join(SHA256("room"),"slave") ─→
-                     ←── client_joined(id=2,e2e=true)        ←── channel_joined(peers=[{id=1,e2e=true}])
+                     ←── client_joined(id=2)                  ←── channel_joined(origin=2, peers=[{id=1}])
 
 e2e_pubkey(pk_a, np_a) ────────→ relay(origin=1) ─────────→ add_peer(1, pk_a, np_a)
                                                              DH + HKDF(dh_secret, "room", "nvda-remote-e2e")
@@ -252,16 +246,3 @@ The `e2e_pubkey` message grows from ~90 bytes to ~1.6 KB (ML-KEM-768 public keys
 ### Dependency status
 
 ML-KEM is not yet available in PyNaCl (which wraps libsodium). The Python client would need `pqcrypto` or `liboqs-python`. This is a client-side concern — the server needs zero changes.
-
-## Server configuration
-
-E2E availability is controlled by `[e2e] allow` in `config/config.toml`:
-
-```toml
-[e2e]
-allow = true  # default
-```
-
-Environment override: `NVDAREMOTE__E2E__ALLOW=true`
-
-When `false`, the server sets `e2e_available: false` in `channel_joined` and clients must not initiate E2E.

@@ -30,13 +30,10 @@ fn hash_channel(key: &str) -> String {
 }
 
 fn setup_server() -> Arc<nvdaremote_server_rs::server::ServerState> {
-    nvdaremote_server_rs::server::ServerState::new(
-        nvdaremote_server_rs::config::MotdConfig {
-            message: String::new(),
-            always_send: false,
-        },
-        true,
-    )
+    nvdaremote_server_rs::server::ServerState::new(nvdaremote_server_rs::config::MotdConfig {
+        message: String::new(),
+        always_send: false,
+    })
 }
 
 fn connect_client(state: &Arc<nvdaremote_server_rs::server::ServerState>) -> DuplexStream {
@@ -207,7 +204,7 @@ async fn join_two_v3_clients(
     )
     .await;
     let msg = recv(&mut r1).await; // channel_joined
-    let uid1 = msg["user_id"].as_u64().unwrap();
+    let uid1 = msg["origin"].as_u64().unwrap();
 
     let stream2 = connect_client(state);
     let (mut w2, mut r2) = split_client(stream2);
@@ -218,7 +215,7 @@ async fn join_two_v3_clients(
     )
     .await;
     let msg = recv(&mut r2).await; // channel_joined
-    let uid2 = msg["user_id"].as_u64().unwrap();
+    let uid2 = msg["origin"].as_u64().unwrap();
 
     let _ = recv(&mut r1).await; // client_joined for client 2
 
@@ -739,7 +736,7 @@ async fn e2e_three_clients_pairwise() {
     )
     .await;
     let msg = recv(&mut r1).await;
-    let uid1 = msg["user_id"].as_u64().unwrap();
+    let uid1 = msg["origin"].as_u64().unwrap();
 
     let stream2 = connect_client(&state);
     let (mut w2, mut r2) = split_client(stream2);
@@ -750,7 +747,7 @@ async fn e2e_three_clients_pairwise() {
     )
     .await;
     let msg = recv(&mut r2).await;
-    let uid2 = msg["user_id"].as_u64().unwrap();
+    let uid2 = msg["origin"].as_u64().unwrap();
     let _ = recv(&mut r1).await; // client_joined
 
     let stream3 = connect_client(&state);
@@ -762,7 +759,7 @@ async fn e2e_three_clients_pairwise() {
     )
     .await;
     let msg = recv(&mut r3).await;
-    let uid3 = msg["user_id"].as_u64().unwrap();
+    let uid3 = msg["origin"].as_u64().unwrap();
     let _ = recv(&mut r1).await; // client_joined for 3
     let _ = recv(&mut r2).await; // client_joined for 3
 
