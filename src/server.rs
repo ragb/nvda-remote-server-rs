@@ -172,6 +172,7 @@ impl ServerState {
 }
 
 /// Stats for the admin dashboard and metrics endpoints.
+#[cfg(any(feature = "prometheus", feature = "admin"))]
 impl ServerState {
     /// Total number of connected clients across all channels.
     pub fn connection_count(&self) -> usize {

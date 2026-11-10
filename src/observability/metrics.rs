@@ -2,6 +2,7 @@
 
 // Gauges
 pub const ACTIVE_CONNECTIONS: &str = "active_connections";
+#[cfg(any(feature = "prometheus", feature = "admin"))]
 pub const ACTIVE_CHANNELS: &str = "active_channels";
 
 // Counters
@@ -15,6 +16,7 @@ pub const KEYS_GENERATED_TOTAL: &str = "keys_generated_total";
 pub const BYTES_RELAYED_TOTAL: &str = "bytes_relayed_total";
 
 /// Register metric descriptions with the global recorder.
+#[cfg(any(feature = "prometheus", feature = "admin"))]
 pub fn describe_metrics() {
     use metrics::{describe_counter, describe_gauge};
 

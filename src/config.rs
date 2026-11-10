@@ -7,6 +7,7 @@ pub struct AppConfig {
     pub motd: MotdConfig,
     #[serde(default)]
     pub tls: TlsConfig,
+    #[cfg(any(feature = "prometheus", feature = "admin"))]
     #[serde(default)]
     pub metrics: MetricsConfig,
 }
@@ -30,6 +31,7 @@ pub struct TlsConfig {
     pub key_path: Option<String>,
 }
 
+#[cfg(any(feature = "prometheus", feature = "admin"))]
 #[derive(Debug, Deserialize, Clone)]
 pub struct MetricsConfig {
     #[serde(default)]
@@ -40,6 +42,7 @@ pub struct MetricsConfig {
     pub port: u16,
 }
 
+#[cfg(any(feature = "prometheus", feature = "admin"))]
 impl Default for MetricsConfig {
     fn default() -> Self {
         Self {
@@ -50,6 +53,7 @@ impl Default for MetricsConfig {
     }
 }
 
+#[cfg(any(feature = "prometheus", feature = "admin"))]
 impl MetricsConfig {
     fn default_bind() -> String {
         "127.0.0.1".to_string()
