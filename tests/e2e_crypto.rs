@@ -30,12 +30,10 @@ fn hash_channel(key: &str) -> String {
 }
 
 fn setup_server() -> Arc<nvdaremote_server_rs::server::ServerState> {
-    nvdaremote_server_rs::server::ServerState::new(
-        nvdaremote_server_rs::config::MotdConfig {
-            message: String::new(),
-            always_send: false,
-        },
-    )
+    nvdaremote_server_rs::server::ServerState::new(nvdaremote_server_rs::config::MotdConfig {
+        message: String::new(),
+        always_send: false,
+    })
 }
 
 fn connect_client(state: &Arc<nvdaremote_server_rs::server::ServerState>) -> DuplexStream {

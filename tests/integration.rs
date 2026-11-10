@@ -28,12 +28,10 @@ fn hash_channel(key: &str) -> String {
 
 /// Helper: create server state and spawn a client handler, returning the client-side stream.
 fn setup_server() -> Arc<nvdaremote_server_rs::server::ServerState> {
-    nvdaremote_server_rs::server::ServerState::new(
-        nvdaremote_server_rs::config::MotdConfig {
-            message: "Welcome to test server".to_string(),
-            always_send: true,
-        },
-    )
+    nvdaremote_server_rs::server::ServerState::new(nvdaremote_server_rs::config::MotdConfig {
+        message: "Welcome to test server".to_string(),
+        always_send: true,
+    })
 }
 
 /// Spawn a client handler and return the client-side duplex stream for writing/reading.
@@ -719,12 +717,11 @@ async fn protocol_version_without_join_is_fine() {
 
 #[tokio::test]
 async fn motd_sent_when_message_not_empty() {
-    let state = nvdaremote_server_rs::server::ServerState::new(
-        nvdaremote_server_rs::config::MotdConfig {
+    let state =
+        nvdaremote_server_rs::server::ServerState::new(nvdaremote_server_rs::config::MotdConfig {
             message: "Custom MOTD".to_string(),
             always_send: false,
-        },
-    );
+        });
 
     let stream = connect_client(&state);
     let (mut writer, mut reader) = split_client(stream);
